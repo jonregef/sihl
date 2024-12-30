@@ -1,10 +1,12 @@
-# python generated files
-__pycache__/
-*.py[oc]
-build/
+__pycache__
+.coverage*
+.mypy_cache/
+.pytest_cache
+.python-version
+.ruff_cache
+.venv/
+.vscode/
+*.onnx
 dist/
-wheels/
-*.egg-info
-
-# venv
-.venv
+lightning_logs/
+tmp/
