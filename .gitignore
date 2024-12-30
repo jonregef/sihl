@@ -1,0 +1,12 @@
+__pycache__
+.coverage*
+.mypy_cache/
+.pytest_cache
+.python-version
+.ruff_cache
+.venv/
+.vscode/
+*.onnx
+dist/
+lightning_logs/
+tmp/
