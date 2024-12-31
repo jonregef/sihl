@@ -1,0 +1,111 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  tests:
+    continue-on-error: ${{ matrix.experimental }}
+    name: ${{ matrix.session }} ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.12"
+            os: "ubuntu-24.04"
+            session: "tests"
+            experimental: false
+          # - python: "3.11"
+          #   os: "ubuntu-24.04"
+          #   session: "tests"
+          #   experimental: false
+          # - python: "3.10"
+          #   os: "ubuntu-24.04"
+          #   session: "tests"
+          #   experimental: false
+          # - python: "3.9"
+          #   os: "ubuntu-24.04"
+          #   session: "tests"
+          #   experimental: false
+          # - python: "3.12"
+          #   os: "windows-latest"
+          #   session: "tests"
+          #   experimental: true
+          # - python: "3.12"
+          #   os: "macos-latest"
+          #   session: "tests"
+          #   experimental: true
+
+    env:
+      FORCE_COLOR: "1"
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v3
+
+      - name: Set python version
+        run: echo "${{ matrix.python }}" > .python-version
+
+      - name: Install rye
+        uses: eifinger/setup-rye@v4
+        with:
+          version: "0.39.0"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: rye sync
+
+      - name: Run tests
+        run: rye run coverage run -m pytest --verbose tests/
+
+      - name: Upload coverage data
+        if: matrix.python == '3.12' && matrix.os == 'ubuntu-24.04' && matrix.session == 'tests'
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: coverage-data
+          path: ".coverage"
+          include-hidden-files: true
+
+  coverage:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    needs: tests
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v3
+
+      - name: Install rye
+        uses: eifinger/setup-rye@v4
+        with:
+          version: "0.39.0"
+          enable-cache: true
+
+      - name: Download coverage data
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-data
+
+      - name: Combine coverage data and display human readable report
+        run: |
+          rye sync
+          rye run coverage report --show-missing --skip-covered --ignore-errors
+          rye run coverage json --ignore-errors
+          export TOTAL=$(python -c "import json;print(json.load(open('coverage.json'))['totals']['percent_covered_display'])")
+          echo "total=$TOTAL" >> $GITHUB_ENV
+          echo "### Total coverage: ${TOTAL}%" >> $GITHUB_STEP_SUMMARY
+
+      - name: "Make badge"
+        uses: schneegans/dynamic-badges-action@v1.4.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: c203d6bce2a485ab49d1814ff3218a06
+          filename: covbadge.json
+          label: Coverage
+          message: ${{ env.total }}%
+          minColorRange: 50
+          maxColorRange: 90
+          valColorRange: ${{ env.total }}
