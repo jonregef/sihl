@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  workflow_dispatch: # Manual trigger
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # Fetch all history for version comparison
+
+      - name: Install rye
+        uses: eifinger/setup-rye@v4
+        with:
+          version: "0.39.0"
+          enable-cache: true
+
+      - name: Get current version
+        id: current_version
+        run: |
+          VERSION=$(rye version)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Get latest release version
+        id: latest_version
+        run: |
+          LATEST=$(gh release list --limit 1 | cut -f1)
+          echo "version=${LATEST:-v0.0.0}" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Compare versions
+        id: compare_versions
+        run: |
+          current="${{ steps.current_version.outputs.version }}"
+          latest="${{ steps.latest_version.outputs.version }}"
+          if [ "$(printf '%s\n' "$latest" "$current" | sort -V | tail -n1)" = "$current" ] && [ "$current" != "$latest" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build package
+        if: steps.compare_versions.outputs.should_release == 'true'
+        run: rye build
+
+      # - name: Publish to PyPI
+      #   if: steps.compare_versions.outputs.should_release == 'true'
+      #   run: rye publish
+      #   env:
+      #     PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}

@@ -1,6 +1,6 @@
 [project]
 name = "sihl"
-version = "0.0.0"
+version = "0.0.3.post1"
 description = "Simple Image Heads and Layers"
 authors = [{ name = "Jon", email = "jon@sihl.ai" }]
 dependencies = [
@@ -15,6 +15,22 @@ license = "Apache-2.0"
 homepage = "https://sihl.ai"
 requires-python = ">= 3.9"
 repository = "https://github.com/jonregef/sihl"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.9",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/jonregef/sihl"
 
 [project.optional-dependencies]
 timm = [
@@ -35,7 +51,7 @@ all = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.26.3"]  # https://github.com/astral-sh/rye/issues/1446#issuecomment-2545154562
 build-backend = "hatchling.build"
 
 [tool.rye]
@@ -69,3 +85,18 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sihl"]
+
+[tool.hatch.build.targets.sdist]
+packages = [
+    ".gitignore",
+    ".python-version",
+    "examples/*.py",
+    "examples/README.md",
+    "LICENSE",
+    "pyproject.toml",
+    "README.md",
+    "requirements-dev.lock",
+    "requirements.lock",
+    "src/sihl",
+    "tests",
+]
