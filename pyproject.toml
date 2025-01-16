@@ -1,6 +1,6 @@
 [project]
 name = "sihl"
-version = "0.0.3.post4"
+version = "0.0.3.post5"
 description = "Simple Image Heads and Layers"
 authors = [{ name = "Jon", email = "jon@sihl.ai" }]
 dependencies = [
