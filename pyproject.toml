@@ -9,7 +9,7 @@ dependencies = [
     "torch>=2.5.1",
     "torchmetrics>=1.6.0",
     "torchvision>=0.20.1",
-    "matplotlib==3.10.0",
+    "matplotlib>=3.10.0",
 ]
 readme = "README.md"
 license = "Apache-2.0"
