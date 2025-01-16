@@ -10,3 +10,4 @@ __pycache__
 dist/
 lightning_logs/
 tmp/
+.tmpvenv
