@@ -1,20 +1,19 @@
 [project]
 name = "sihl"
-version = "0.0.3.post1"
+version = "0.0.3.post5"
 description = "Simple Image Heads and Layers"
 authors = [{ name = "Jon", email = "jon@sihl.ai" }]
 dependencies = [
-    "einops[torch]>=0.8.0",
+    "einops>=0.8.0",
     "faster-coco-eval>=1.6.5",
     "torch>=2.5.1",
     "torchmetrics>=1.6.0",
     "torchvision>=0.20.1",
+    "matplotlib>=3.10.0",
 ]
 readme = "README.md"
 license = "Apache-2.0"
-homepage = "https://sihl.ai"
 requires-python = ">= 3.9"
-repository = "https://github.com/jonregef/sihl"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -31,18 +30,12 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/jonregef/sihl"
+Repository = "https://github.com/jonregef/sihl"
 
 [project.optional-dependencies]
-timm = [
-    "timm>=1.0.12",
-]
-lightning = [
-    "lightning>=2.4.0",
-]
-onnx = [
-    "onnx>=1.17.0",
-    "onnxruntime>=1.19.2",
-]
+timm = ["timm>=1.0.12"]
+lightning = ["lightning>=2.4.0"]
+onnx = ["onnx>=1.17.0", "onnxruntime>=1.19.2"]
 all = [
     "lightning>=2.4.0",
     "onnx>=1.17.0",
@@ -51,7 +44,8 @@ all = [
 ]
 
 [build-system]
-requires = ["hatchling==1.26.3"]  # https://github.com/astral-sh/rye/issues/1446#issuecomment-2545154562
+# https://github.com/astral-sh/rye/issues/1446#issuecomment-2545154562
+requires = ["hatchling==1.26.3"]
 build-backend = "hatchling.build"
 
 [tool.rye]
@@ -80,23 +74,5 @@ dev-dependencies = [
     "types-pyyaml>=6.0.12.20240917",
 ]
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/sihl"]
-
 [tool.hatch.build.targets.sdist]
-packages = [
-    ".gitignore",
-    ".python-version",
-    "examples/*.py",
-    "examples/README.md",
-    "LICENSE",
-    "pyproject.toml",
-    "README.md",
-    "requirements-dev.lock",
-    "requirements.lock",
-    "src/sihl",
-    "tests",
-]
+exclude = ["examples/data", "examples/logs"]

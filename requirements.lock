@@ -10,6 +10,10 @@
 #   universal: false
 
 -e file:.
+contourpy==1.3.1
+    # via matplotlib
+cycler==0.12.1
+    # via matplotlib
 einops==0.8.0
     # via sihl
 faster-coco-eval==1.6.5
@@ -17,20 +21,28 @@ faster-coco-eval==1.6.5
 filelock==3.16.1
     # via torch
     # via triton
+fonttools==4.55.3
+    # via matplotlib
 fsspec==2024.12.0
     # via torch
 jinja2==3.1.5
     # via torch
+kiwisolver==1.4.8
+    # via matplotlib
 lightning-utilities==0.11.9
     # via torchmetrics
 markupsafe==3.0.2
     # via jinja2
+matplotlib==3.10.0
+    # via sihl
 mpmath==1.3.0
     # via sympy
 networkx==3.4.2
     # via torch
 numpy==2.2.1
+    # via contourpy
     # via faster-coco-eval
+    # via matplotlib
     # via pandas
     # via torchmetrics
     # via torchvision
@@ -65,16 +77,21 @@ nvidia-nvtx-cu12==12.4.127
     # via torch
 packaging==24.2
     # via lightning-utilities
+    # via matplotlib
     # via plotly
     # via torchmetrics
 pandas==2.2.3
     # via faster-coco-eval
 pillow==11.0.0
     # via faster-coco-eval
+    # via matplotlib
     # via torchvision
 plotly==5.24.1
     # via faster-coco-eval
+pyparsing==3.2.1
+    # via matplotlib
 python-dateutil==2.9.0.post0
+    # via matplotlib
     # via pandas
 pytz==2024.2
     # via pandas

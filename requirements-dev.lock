@@ -93,6 +93,7 @@ markupsafe==3.0.2
     # via werkzeug
 matplotlib==3.10.0
     # via pycocotools
+    # via sihl
 matplotlib-inline==0.1.7
     # via ipython
 mdurl==0.1.2
