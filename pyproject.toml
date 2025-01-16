@@ -44,9 +44,8 @@ all = [
 ]
 
 [build-system]
-requires = [
-    "hatchling==1.26.3",
-] # https://github.com/astral-sh/rye/issues/1446#issuecomment-2545154562
+# https://github.com/astral-sh/rye/issues/1446#issuecomment-2545154562
+requires = ["hatchling==1.26.3"]
 build-backend = "hatchling.build"
 
 [tool.rye]
@@ -76,7 +75,4 @@ dev-dependencies = [
 ]
 
 [tool.hatch.build.targets.sdist]
-exclude = [
-  "examples/data",
-  "examples/logs",
-]
+exclude = ["examples/data", "examples/logs"]
