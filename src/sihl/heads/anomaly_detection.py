@@ -3,6 +3,7 @@ from typing import List, Dict, Tuple, Optional
 
 from einops import rearrange, reduce
 from torch import nn, Tensor
+from torch.nn import functional
 from torchmetrics import MeanMetric, JaccardIndex, Accuracy
 import torch
 
@@ -10,10 +11,10 @@ from sihl.layers import (
     SimpleDownscaler,
     SimpleUpscaler,
     ConvNormAct,
-    BilinearScaler,
+    Interpolate,
     SequentialConvBlocks,
 )
-from sihl.utils import interpolate, BatchedMeanVarianceAccumulator
+from sihl.utils import BatchedMeanVarianceAccumulator
 
 sequential_downscalers = partial(SequentialConvBlocks, ConvBlock=SimpleDownscaler)
 sequential_upscalers = partial(SequentialConvBlocks, ConvBlock=SimpleUpscaler)
@@ -85,7 +86,7 @@ class AnomalyDetection(nn.Module):
             ),
         )
         size = 8
-        self.autoencoder_resize = BilinearScaler(size=(size, size))
+        self.autoencoder_resize = Interpolate(size=(size, size))
         self.autoencoder_bottleneck = nn.Sequential(
             nn.Linear(size * size * self.ae_channels, self.ae_channels),
             nn.Linear(self.ae_channels, size * size * self.ae_channels),
@@ -126,7 +127,9 @@ class AnomalyDetection(nn.Module):
         encoded = rearrange(
             self.autoencoder_bottleneck(encoded), "b (c h w) -> b c h w", h=h, w=w
         )
-        autoencoder_out = self.autoencoder_decoder(interpolate(encoded, size=old_size))
+        autoencoder_out = self.autoencoder_decoder(
+            functional.interpolate(encoded, size=old_size)
+        )
 
         distance_ae = (autoencoder_out - teacher_out).pow(2)
         distance_st = (teacher_out - student_out[:, : self.out_channels]).pow(2)
@@ -144,7 +147,7 @@ class AnomalyDetection(nn.Module):
             (global_anomaly - self.q_ae_start) / (self.q_ae_end - self.q_ae_start)
         )
         anomaly = (local_anomaly.relu() + global_anomaly.relu()).clamp(0, 1)
-        return interpolate(anomaly, size=inputs[0].shape[2:]).squeeze(1)
+        return functional.interpolate(anomaly, size=inputs[0].shape[2:]).squeeze(1)
 
     def training_step(
         self,

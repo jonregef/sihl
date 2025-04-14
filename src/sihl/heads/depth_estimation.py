@@ -9,7 +9,7 @@ import torch
 
 from sihl.heads.semantic_segmentation import SemanticSegmentation
 from sihl.layers import SequentialConvBlocks
-from sihl.utils import interpolate, EPS
+from sihl.utils import EPS
 
 
 class DepthEstimation(SemanticSegmentation):
@@ -88,7 +88,7 @@ class DepthEstimation(SemanticSegmentation):
     def forward(self, inputs: List[Tensor]) -> Tensor:
         bin_centers = self.get_bin_centers(inputs)
         depth_map = self.denormalize(self.get_depth_map(inputs, bin_centers))
-        return interpolate(depth_map, size=inputs[0].shape[2:]).squeeze(1)
+        return functional.interpolate(depth_map, size=inputs[0].shape[2:]).squeeze(1)
 
     def training_step(
         self, inputs: List[Tensor], targets: Tensor, masks: Tensor
@@ -101,15 +101,16 @@ class DepthEstimation(SemanticSegmentation):
         bin_centers = self.get_bin_centers(inputs)
         depth_map = self.get_depth_map(inputs, bin_centers=bin_centers)
         pred_shape = depth_map.shape[2:]
-        depth_map = interpolate(depth_map, size=targets.shape[2:])
+        depth_map = functional.interpolate(depth_map, size=targets.shape[2:])
 
         g = (depth_map[masks] + EPS).log() - (targets[masks] + EPS).log()
         pix_loss = torch.sqrt(g.var() + 0.15 * g.mean().pow(2)) * 10
 
         masks = functional.interpolate(
-            masks.to(torch.uint8), size=pred_shape, mode="nearest-exact"
-        ).to(torch.bool)
-        targets = interpolate(targets, size=pred_shape)
+            masks.to(torch.uint8), size=pred_shape, mode="nearest"
+        )
+        masks = masks > 0
+        targets = functional.interpolate(targets, size=pred_shape)
         hist_losses = []  # bidirectional chamfer loss
         for batch_idx in range(batch_size):
             target_hist = rearrange(targets[batch_idx][masks[batch_idx]], "k -> k 1")

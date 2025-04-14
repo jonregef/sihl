@@ -23,10 +23,6 @@ class QuadrilateralDetection(ObjectDetection):
         num_channels: int = 256,
         num_layers: int = 4,
         max_instances: int = 100,
-        t_min: float = 0.2,
-        t_max: float = 0.6,
-        topk: int = 7,
-        soft_label_decay_steps: int = 1,
     ) -> None:
         """
         Args:
@@ -37,10 +33,6 @@ class QuadrilateralDetection(ObjectDetection):
             num_channels (int, optional): Number of convolutional channels. Defaults to 256.
             num_layers (int, optional): Number of convolutional layers. Defaults to 4.
             max_instances (int, optional): Maximum number of instances to predict in a sample. Defaults to 100.
-            t_min (float, optional): Lower bound of O2F parameter t. Defaults to 0.2.
-            t_max (float, optional): Upper bound of O2F parameter t. Defaults to 0.6.
-            topk (int, optional): How many anchors to match to each ground truth object when copmuting the loss. Defaults to 7.
-            soft_label_decay_steps (int, optional): How many training steps to perform before the one-to-few matching becomes one-to-one. Defaults to 1.
         """
         super().__init__(
             in_channels=in_channels,
@@ -50,13 +42,9 @@ class QuadrilateralDetection(ObjectDetection):
             num_channels=num_channels,
             num_layers=num_layers,
             max_instances=max_instances,
-            t_min=t_min,
-            t_max=t_max,
-            topk=topk,
-            soft_label_decay_steps=soft_label_decay_steps,
         )
 
-        del self.box_head
+        # del self.box_head
         self.quad_head = nn.Conv2d(self.num_channels, 8, kernel_size=1)
         self.get_boxes = self.get_quads
         self.box_iou = polygon_iou

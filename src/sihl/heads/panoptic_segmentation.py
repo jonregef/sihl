@@ -8,7 +8,6 @@ from torchvision.ops import masks_to_boxes
 import torch
 
 from sihl.layers import ConvNormAct, SimpleUpscaler
-from sihl.utils import interpolate
 
 from .instance_segmentation import InstanceSegmentation
 
@@ -32,11 +31,6 @@ class PanopticSegmentation(InstanceSegmentation):
         num_channels: int = 256,
         num_layers: int = 4,
         max_instances: int = 100,
-        t_min: float = 0.2,
-        t_max: float = 0.6,
-        topk: int = 7,
-        soft_label_decay_steps: int = 1,
-        mask_top_level: int = 5,
         ignore_index: int = -100,
     ) -> None:
         """
@@ -49,25 +43,15 @@ class PanopticSegmentation(InstanceSegmentation):
             num_channels (int, optional): Number of convolutional channels. Defaults to 256.
             num_layers (int, optional): Number of convolutional layers. Defaults to 4.
             max_instances (int, optional): Maximum number of instances to predict in a sample. Defaults to 100.
-            t_min (float, optional): Lower bound of O2F parameter t. Defaults to 0.2.
-            t_max (float, optional): Upper bound of O2F parameter t. Defaults to 0.6.
-            topk (int, optional): How many anchors to match to each ground truth object when copmuting the loss. Defaults to 7.
-            soft_label_decay_steps (int, optional): How many training steps to perform before the one-to-few matching becomes one-to-one. Defaults to 1.
-            mask_top_level (int, optional): Top level of inputs masks are computed from. Defaults to 5.
         """
         super().__init__(
             in_channels=in_channels,
             num_classes=num_thing_classes,
-            mask_top_level=mask_top_level,
-            soft_label_decay_steps=soft_label_decay_steps,
             num_channels=num_channels,
             num_layers=num_layers,
             bottom_level=bottom_level,
             top_level=top_level,
             max_instances=max_instances,
-            t_min=t_min,
-            t_max=t_max,
-            topk=topk,
         )
 
         self.ignore_index = ignore_index  # https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html
@@ -83,21 +67,21 @@ class PanopticSegmentation(InstanceSegmentation):
                         for _ in range(level - bottom_level)
                     ],
                 )
-                for level in range(bottom_level + 1, self.mask_top_level + 1)
+                for level in range(bottom_level + 1, self.top_level + 1)
             ]
         )
         self.semantic_out_conv = nn.Conv2d(self.num_channels, num_stuff_classes, 1)
         self.output_shapes = {"panoptic_maps": ("batch_size", 2, "height", "width")}
 
     def get_semantic_map(self, inputs: List[Tensor]) -> Tensor:
-        xs = inputs[self.bottom_level : self.mask_top_level + 1]
+        xs = inputs[self.bottom_level : self.top_level + 1]
         outs = [conv(x) for x, conv in zip(xs, self.semantic_branch)]
         return self.semantic_out_conv(torch.stack(outs).sum(dim=0))
 
     def forward(self, inputs: List[Tensor]) -> Tensor:
         num_instances, scores, classes, masks = super().forward(inputs)
         things = self.instance_to_panoptic(scores, classes, masks)
-        stuff = interpolate(
+        stuff = functional.interpolate(
             self.get_semantic_map(inputs), size=inputs[0].shape[2:]
         ).argmax(dim=1, keepdim=True)
         stuff = stuff * (things[:, 0:1] == 0)  # zero-out thing pixels
@@ -153,7 +137,7 @@ class PanopticSegmentation(InstanceSegmentation):
             inputs, instance_classes, instance_masks, is_validating
         )
 
-        pred_semantic_map = interpolate(
+        pred_semantic_map = functional.interpolate(
             self.get_semantic_map(inputs), size=targets.shape[2:]
         )
         semantic_target = targets[:, 0]
@@ -184,7 +168,7 @@ class PanopticSegmentation(InstanceSegmentation):
     ) -> Tuple[Tensor, Dict[str, Any]]:
         num_instances, scores, classes, masks = super().forward(inputs)
         things = self.instance_to_panoptic(scores, classes, masks)
-        stuff = interpolate(
+        stuff = functional.interpolate(
             self.get_semantic_map(inputs), size=inputs[0].shape[2:]
         ).argmax(dim=1)
         stuff = stuff * (things[:, 0] == 0)  # zero-out thing pixels

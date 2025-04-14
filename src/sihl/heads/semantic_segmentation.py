@@ -5,13 +5,7 @@ from torch.nn import functional
 from torchmetrics import JaccardIndex, MeanMetric, Accuracy
 import torch
 
-from sihl.layers import (
-    ConvNormAct,
-    SequentialConvBlocks,
-    SimpleUpscaler,
-    BilinearScaler,
-)
-from sihl.utils import interpolate
+from sihl.layers import ConvNormAct, SequentialConvBlocks, SimpleUpscaler, Interpolate
 
 
 class SemanticSegmentation(nn.Module):
@@ -87,13 +81,13 @@ class SemanticSegmentation(nn.Module):
         return self.out_conv(x)
 
     def forward(self, inputs: List[Tensor]) -> Tuple[Tensor, Tensor]:
-        x = interpolate(self.get_logits(inputs), size=inputs[0].shape[2:])
+        x = functional.interpolate(self.get_logits(inputs), size=inputs[0].shape[2:])
         return x.softmax(dim=1).max(dim=1)
 
     def training_step(
         self, inputs: List[Tensor], targets: Tensor
     ) -> Tuple[Tensor, Dict[str, float]]:
-        logits = interpolate(self.get_logits(inputs), size=targets.shape[1:])
+        logits = functional.interpolate(self.get_logits(inputs), size=targets.shape[1:])
         loss = functional.cross_entropy(logits, targets, ignore_index=self.ignore_index)
         return loss, {}
 
@@ -110,7 +104,7 @@ class SemanticSegmentation(nn.Module):
     def validation_step(
         self, inputs: List[Tensor], targets: Tensor
     ) -> Tuple[Tensor, Dict[str, float]]:
-        logits = interpolate(self.get_logits(inputs), size=targets.shape[1:])
+        logits = functional.interpolate(self.get_logits(inputs), size=targets.shape[1:])
         loss = functional.cross_entropy(logits, targets, ignore_index=self.ignore_index)
         scores = logits.softmax(dim=1)
         self.mean_iou_computer.to(loss.device).update(scores, targets)
@@ -141,8 +135,8 @@ class SPPM(nn.Module):
         self.pools = nn.ModuleList(
             [
                 nn.Sequential(
-                    # HACK: `AdaptiveAvgPool2d` fails ONNX export, so use interpolation
-                    BilinearScaler(size=pool_size),
+                    # NOTE: `AdaptiveAvgPool2d` fails ONNX export, so use interpolation
+                    Interpolate(size=pool_size),
                     ConvNormAct(in_channels, out_channels, 1),
                 )
                 for pool_size in pool_sizes
@@ -156,7 +150,10 @@ class SPPM(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         fused = torch.stack(
-            [interpolate(pool(x), size=x.shape[2:]) for pool in self.pools]
+            [
+                functional.interpolate(pool(x), size=x.shape[2:], mode="bilinear")
+                for pool in self.pools
+            ]
         ).sum(0)
         if self.with_shortcut:
             fused = fused + self.shortcut(x)
