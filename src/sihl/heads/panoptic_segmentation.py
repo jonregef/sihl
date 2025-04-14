@@ -8,8 +8,7 @@ from torchvision.ops import masks_to_boxes
 import torch
 
 from sihl.layers import ConvNormAct, SimpleUpscaler
-
-from .instance_segmentation import InstanceSegmentation
+from sihl.heads.instance_segmentation import InstanceSegmentation
 
 
 class PanopticSegmentation(InstanceSegmentation):
@@ -27,7 +26,7 @@ class PanopticSegmentation(InstanceSegmentation):
         num_stuff_classes: int,
         num_thing_classes: int,
         bottom_level: int = 3,
-        top_level: int = 7,
+        top_level: int = 5,
         num_channels: int = 256,
         num_layers: int = 4,
         max_instances: int = 100,
@@ -181,21 +180,26 @@ class PanopticSegmentation(InstanceSegmentation):
         map_computer_preds = []
         for batch_idx, sample_masks in enumerate(masks):
             non_empty_idxs = torch.any(sample_masks > 0.5, dim=(1, 2))
-            sample_boxes = masks_to_boxes(sample_masks[non_empty_idxs] > 0.5)
+            # sample_boxes = masks_to_boxes(sample_masks[non_empty_idxs] > 0.5)
             map_computer_preds.append(
                 {
                     "scores": scores[batch_idx][non_empty_idxs],
                     "labels": classes[batch_idx][non_empty_idxs],
-                    "boxes": sample_boxes,
+                    "masks": sample_masks[non_empty_idxs] > 0.5,
+                    # "boxes": sample_boxes,
                 }
             )
         target_classes, target_masks = self.panoptic_to_instance(targets)
-        target_boxes = [masks_to_boxes(_) for _ in target_masks]
+        # target_boxes = [masks_to_boxes(_) for _ in target_masks]
         self.map_computer.to(stuff.device).update(
             map_computer_preds,
             [
-                {"labels": c.to(torch.int64), "boxes": b}
-                for c, b in zip(target_classes, target_boxes)
+                {
+                    "labels": c.to(torch.int64),
+                    "masks": b,
+                    # "boxes": b,
+                }
+                for c, b in zip(target_classes, target_masks)  # target_boxes)
             ],
         )
 
