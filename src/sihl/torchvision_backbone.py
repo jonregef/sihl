@@ -1,6 +1,7 @@
 from typing import Final, List, Dict, Type
 
 from torch import Tensor, nn
+from torch.nn import functional
 from torchvision.models.feature_extraction import create_feature_extractor
 import torch
 import torchvision
@@ -176,11 +177,13 @@ class TorchvisionBackbone(nn.Module):
         assert input.shape[2] % 2**self.top_level == 0
         assert input.shape[3] % 2**self.top_level == 0
         x = self.normalize(input)
-        outputs = [input] + list(self.model(x).values())
-        # outputs = [input] + [
-        #     interpolate(output, size=(x.shape[2] // 2**level, x.shape[3] // 2**level))
-        #     for output, level in zip(outputs, range(1, self.top_level + 1))
-        # ]
+        outputs = list(self.model(x).values())
+        outputs = [input] + [
+            functional.interpolate(
+                output, size=(x.shape[2] // 2**level, x.shape[3] // 2**level)
+            )
+            for output, level in zip(outputs, range(1, self.top_level + 1))
+        ]
         for downscaler in self.downscalers:
             outputs.append(downscaler(outputs[-1]))
         return outputs
