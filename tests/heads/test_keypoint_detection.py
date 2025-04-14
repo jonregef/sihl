@@ -37,13 +37,14 @@ def backbone_output() -> List[Tensor]:
 
 @pytest.fixture()
 def targets() -> Dict[str, List[Tensor]]:
+    num_objects = range(BATCH_SIZE)  # tests target with 0 objects too
     return {
         "presence": [
-            torch.randint(0, 2, (MAX_INSTANCES, NUM_KEYPOINTS), dtype=bool)
+            torch.randint(0, 2, (num_objects[_], NUM_KEYPOINTS), dtype=bool)
             for _ in range(BATCH_SIZE)
         ],
         "keypoints": [
-            torch.rand((MAX_INSTANCES, NUM_KEYPOINTS, 2)) for _ in range(BATCH_SIZE)
+            torch.rand((num_objects[_], NUM_KEYPOINTS, 2)) for _ in range(BATCH_SIZE)
         ],
     }
 

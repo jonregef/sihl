@@ -33,6 +33,7 @@ def visualize(
     logger: Any,
     step: int,
     start_idx: int = 0,
+    prefix: str = "",
 ):
     features = model.eval().extract_features(input)
     for idx, (config, head, target) in enumerate(zip(configs, model.heads, targets)):
@@ -41,5 +42,7 @@ def visualize(
         vizs = get_images(head, config, input, target, features)  # singly dispatched
         for viz_idx, viz_img in enumerate(vizs):
             logger.experiment.add_image(
-                f"{idx}/visualizations/{start_idx + viz_idx}", viz_img, global_step=step
+                f"{prefix}{idx}/visualizations/{start_idx + viz_idx}",
+                viz_img,
+                global_step=step,
             )

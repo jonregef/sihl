@@ -55,7 +55,7 @@ def _(head, config, input, target, features) -> List[np.ndarray]:
         axes[2].title.set_text("Prediction")
         axes[2].imshow(np.full_like(image, fill_value=255))
         if prediction is not None:
-            n = max(5, num_instances[batch])
+            n = num_instances[batch]
             for label, mask in zip(pred_classes[batch, :n], pred_masks[batch, :n]):
                 category = str(label) if categories is None else categories[label]
                 legend = None

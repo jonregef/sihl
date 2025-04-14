@@ -20,8 +20,6 @@ torch.set_float32_matmul_precision("high")
 
 
 class SihlLightningModule(pl.LightningModule):
-    log_kwargs = {"on_epoch": False, "on_step": True, "prog_bar": True}
-
     def __init__(
         self,
         model: SihlModel,
@@ -30,6 +28,7 @@ class SihlLightningModule(pl.LightningModule):
         scheduler: Optional[Type[LRScheduler]] = None,
         scheduler_kwargs: Optional[Dict[str, Any]] = None,
         data_config: Optional[List[Dict[str, Any]]] = None,
+        hyperparameters: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         self.model = model
@@ -43,6 +42,8 @@ class SihlLightningModule(pl.LightningModule):
         self.visualization_batches = []
         self.visualize_n_batches = 5
         self.visualize_n_per_batch = 1
+        self.hyperparameters = hyperparameters
+        self.log_kwargs = dict(on_epoch=False, on_step=True, prog_bar=True)
 
     def forward(self, x: Tensor) -> List[Union[Tensor, List[Tensor]]]:
         return self.model(x)
@@ -71,6 +72,17 @@ class SihlLightningModule(pl.LightningModule):
         if not isinstance(targets, list):
             targets = [targets]  # single-headed
 
+        if batch_idx == 0:
+            visualize(
+                model=self.model,
+                configs=self.data_config,
+                input=x.detach(),
+                targets=targets,
+                logger=self.logger,
+                step=self.global_step,
+                prefix="train/",
+            )
+
         head_inputs = self.model.extract_features(x)
         losses = []
         for head_idx, (head, target) in enumerate(zip(self.model.heads, targets)):
@@ -83,9 +95,9 @@ class SihlLightningModule(pl.LightningModule):
             else:
                 loss, metrics = head.training_step(head_inputs, target)
 
-            metrics = {f"{head_idx}/train/{k}": v for k, v in metrics.items()}
+            metrics = {f"head{head_idx}/train/{k}": v for k, v in metrics.items()}
             try:
-                self.log(f"{head_idx}/train/loss", loss, **self.log_kwargs)
+                self.log(f"head{head_idx}/train/loss", loss, **self.log_kwargs)
                 self.log_dict(metrics, **self.log_kwargs)
             except MisconfigurationException:
                 pass
@@ -93,12 +105,13 @@ class SihlLightningModule(pl.LightningModule):
         loss = torch.stack(losses).sum()
         scheduler = self.lr_schedulers()
         try:
+            key = "trainer/learning_rate"
             if isinstance(scheduler, LRScheduler):
-                self.log("learning_rate", scheduler.get_last_lr()[0], **self.log_kwargs)
+                self.log(key, scheduler.get_last_lr()[0], **self.log_kwargs)
             else:
                 lightning_optimizer = self.optimizers()
                 for param_group in lightning_optimizer.optimizer.param_groups:
-                    self.log("learning_rate", param_group["lr"], **self.log_kwargs)
+                    self.log(key, param_group["lr"], **self.log_kwargs)
         except (MisconfigurationException, AttributeError):
             pass
         torch.cuda.empty_cache()
@@ -133,7 +146,7 @@ class SihlLightningModule(pl.LightningModule):
                 head_loss, metrics = head.validation_step(head_inputs, target)
 
             total_loss = head_loss + total_loss
-            metrics = {f"{head_idx}/valid/{k}": v for k, v in metrics.items()}
+            metrics = {f"head{head_idx}/valid/{k}": v for k, v in metrics.items()}
             try:
                 self.log_dict(metrics, on_epoch=True, on_step=False, prog_bar=True)
             except MisconfigurationException:
@@ -167,9 +180,8 @@ class SihlLightningModule(pl.LightningModule):
         optimizer_kwargs = deepcopy(self.optimizer_kwargs)
 
         # It can be beneficial to use a lower lr for the backbone when finetuning
-        base_lr, backbone_lr_factor = optimizer_kwargs.get("lr", 1e-3), 1.0
-        if "backbone_lr_factor" in optimizer_kwargs:
-            backbone_lr_factor = optimizer_kwargs.pop("backbone_lr_factor")
+        base_lr = optimizer_kwargs.get("lr", 1e-3)
+        backbone_lr_factor = optimizer_kwargs.pop("backbone_lr_factor", 1.0)
 
         # backbone_module_names = {mn for mn, m in self.model.backbone.named_modules()}
         backbone_params = set(self.model.backbone.parameters())
@@ -187,6 +199,9 @@ class SihlLightningModule(pl.LightningModule):
                 for pn, p in m.named_parameters():
                     if pn.endswith("bias") or isinstance(m, blacklist):
                         no_decay.add(p)
+                    if hasattr(m, "disable_weight_decay") and m.disable_weight_decay:
+                        no_decay.add(p)
+
             decay = set(self.parameters()) - no_decay
             parameters = [
                 {"params": list(non_backbone_params & decay)},
@@ -205,20 +220,20 @@ class SihlLightningModule(pl.LightningModule):
         optimizer = self.optimizer(parameters, **optimizer_kwargs)
 
         if self.scheduler:
-            warmup_batches = None
-            if "warmup_batches" in self.scheduler_kwargs:
-                warmup_batches = self.scheduler_kwargs.pop("warmup_batches")
+            warmup_steps = None
+            if "warmup" in self.scheduler_kwargs:
+                warmup_steps = self.scheduler_kwargs.pop("warmup")
             scheduler = self.scheduler(optimizer, **self.scheduler_kwargs)
-            if warmup_batches:
+            if warmup_steps:
                 scheduler = torch.optim.lr_scheduler.SequentialLR(
                     optimizer,
                     [
                         torch.optim.lr_scheduler.LinearLR(
-                            optimizer, start_factor=0.01, total_iters=warmup_batches
+                            optimizer, start_factor=0.01, total_iters=warmup_steps
                         ),
                         scheduler,
                     ],
-                    milestones=[warmup_batches],
+                    milestones=[warmup_steps],
                 )
             scheduler_config = {"scheduler": scheduler, "interval": "step"}
             scheduler_config["monitor"] = "loss"
@@ -236,13 +251,24 @@ class SihlLightningModule(pl.LightningModule):
             head: Head
             if not hasattr(head, "on_validation_end"):
                 continue
-            val_metrics = {
-                f"{head_idx}/valid/{k}": v for k, v in head.on_validation_end().items()
+            metrics = {
+                f"head{head_idx}/valid/{k}": v
+                for k, v in head.on_validation_end().items()
             }
             try:
-                self.log_dict(val_metrics, sync_dist=True)
+                self.log_dict(metrics, sync_dist=True)
+                if self.hyperparameters:
+                    for logger in self.loggers:
+                        try:
+                            logger.log_hyperparams(
+                                self.hyperparameters, metrics, step=self.global_step
+                            )
+                        except BaseException as e:
+                            print(e)
+                            pass
             except MisconfigurationException:
                 pass
+
         for viz_batch_idx, viz_batch in enumerate(self.visualization_batches):
             visualize(
                 model=self.model,
@@ -252,6 +278,7 @@ class SihlLightningModule(pl.LightningModule):
                 logger=self.logger,
                 step=self.global_step,
                 start_idx=viz_batch_idx * self.visualize_n_per_batch,
+                prefix="valid/",
             )
 
         torch.cuda.empty_cache()

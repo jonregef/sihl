@@ -1,9 +1,11 @@
 # ruff: noqa: F401
 from typing import Any, Tuple, List, Callable, Union, Optional, Literal
 import functools
+import math
 import random
 import sys
 
+from einops import rearrange
 from torch import nn, Tensor
 from torch.nn import functional
 from torch.nn.functional import avg_pool2d
@@ -11,13 +13,32 @@ import torch
 import torchvision
 
 from sihl.utils.polygon_iou import polygon_iou
+from sihl.utils.oks import ObjectKeypointSimilarity
 
 
 EPS = 1e-5
-interpolate = functools.partial(functional.interpolate, mode="bilinear")
+
+
+def inverse_sigmoid(x: Tensor) -> Tensor:
+    return torch.log(x / (1 - x))
+
+
+def positive_squash(x: Tensor) -> Tensor:
+    return x / (1 + x)
+
+
+def inverse_positive_squash(x: Tensor) -> Tensor:
+    return x / (1 - x)
+
+
+def logcosh(x: Tensor) -> Tensor:
+    """https://datascience.stackexchange.com/a/102234"""
+    return x + functional.softplus(-2.0 * x) - math.log(2.0)
 
 
 class BatchedMeanVarianceAccumulator:
+    """https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm"""
+
     def __init__(self):
         self.count = 0
         self.mean = None
@@ -38,7 +59,7 @@ class BatchedMeanVarianceAccumulator:
             batch_mean = x.mean(dim=0)
             batch_delta = batch_mean - self.mean
             self.mean += batch_delta * batch_count / total_count
-            # Welford's method
+
             self.M2 += (
                 x.var(dim=0, unbiased=False) * batch_count
                 + (batch_delta**2) * self.count * batch_count / total_count
@@ -47,27 +68,24 @@ class BatchedMeanVarianceAccumulator:
         self.count += x.size(0)
 
     def compute(self):
-        """
-        Compute the mean and variance based on the accumulated data.
-        """
         if self.count < 2:
             return self.mean, torch.full_like(self.mean, float("nan"))
         variance = self.M2 / (self.count - 1)
         return self.mean, variance
 
 
-# def init(m: nn.Module, kaiming: bool = True) -> None:
-#     if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-#         if kaiming:
-#             nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-#         else:
-#             nn.init.xavier_normal_(m.weight)
-#         if m.bias is not None:
-#             nn.init.constant_(m.bias, 0)
+def init(m: nn.Module, kaiming: bool = True) -> None:
+    if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+        if kaiming:
+            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+        else:
+            nn.init.xavier_normal_(m.weight)
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
 
-#     elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-#         nn.init.constant_(m.weight, 1)
-#         nn.init.constant_(m.bias, 0)
+    elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+        nn.init.constant_(m.weight, 1)
+        nn.init.constant_(m.bias, 0)
 
 
 def random_pad(
@@ -100,13 +118,28 @@ def random_pad(
     return padded_image
 
 
-def coordinate_grid(height: int, width: int, y_max: float, x_max: float) -> Tensor:
-    """2D grid of pixel center coordinates (0 to x_max, 0 to y_max)."""
-    y_max, x_max = torch.scalar_tensor(y_max), torch.scalar_tensor(x_max)
-    y_min, x_min = y_max / height / 2, x_max / width / 2
-    ys = torch.linspace(y_min, y_max - y_min, steps=height)
-    xs = torch.linspace(x_min, x_max - x_min, steps=width)
-    return torch.stack([xs[None, :].repeat(height, 1), ys[:, None].repeat(1, width)])
+def coordinate_grid(height: int, width: int) -> Tensor:
+    """2D grid of normalized pixel center coordinates."""
+    y_min, x_min = 1 / height / 2, 1 / width / 2
+    ys = torch.linspace(y_min, 1 - y_min, steps=height)[:, None].repeat(1, width)
+    xs = torch.linspace(x_min, 1 - x_min, steps=width)[None, :].repeat(height, 1)
+    return torch.stack([xs, ys], dim=2)
+
+
+def sine_embedding(
+    input_tensor: Tensor, num_channels: int, temperature: float = 10000.0
+) -> Tensor:
+    in_channels, device = input_tensor.shape[-1], input_tensor.device
+    num_frequencies = num_channels // (in_channels * 2)
+    remainder = num_channels % (in_channels * 2)
+    omega = torch.arange(num_frequencies, dtype=torch.float32, device=device)
+    frequencies = (1.0 / (temperature ** (omega / num_frequencies))).unsqueeze(0)
+    values = input_tensor.unsqueeze(-1) @ frequencies
+    embeddings = torch.cat([values.sin(), values.cos()], dim=-1).flatten(-2, -1)
+    if remainder > 0:
+        padding = torch.zeros(*embeddings.shape[:-1], remainder, device=device)
+        embeddings = torch.cat([embeddings, padding], dim=-1)
+    return embeddings
 
 
 def f_score(beta: float) -> Callable[[Tensor, Tensor], Tensor]:
@@ -175,11 +208,13 @@ def focal_loss(
     preds: Tensor, targets: Tensor, alpha: float = 0.25, gamma: float = 2.0
 ) -> Tensor:
     """https://pytorch.org/vision/main/_modules/torchvision/ops/focal_loss.html"""
-    ce_loss = functional.binary_cross_entropy(preds, targets, reduction="none")
-    p_t = preds * targets + (1 - preds) * (1 - targets)
-    loss = ce_loss * ((1 - p_t) ** gamma)
-    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
-    return alpha_t * loss
+    with torch.autocast(device_type="cuda", enabled=False):
+        preds, targets = preds.to(torch.float32), targets.to(torch.float32)
+        ce_loss = functional.binary_cross_entropy(preds, targets, reduction="none")
+        p_t = preds * targets + (1 - preds) * (1 - targets)
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        loss = alpha_t * ce_loss * ((1 - p_t) ** gamma)
+    return loss
 
 
 def tversky_loss(

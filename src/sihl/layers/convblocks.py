@@ -59,25 +59,30 @@ class ConvNormAct(nn.Sequential):
                 padding or ((kernel_size - 1) // 2 * dilation),
                 dilation=dilation,
                 groups=groups,
-                bias=bias or (norm is None),
+                bias=(norm is None) if (bias is None) else bias,
             )
         ]
 
-        if norm == "batch":
-            layers.append(nn.BatchNorm2d(out_channels))
-        elif norm == "group":
-            layers.append(nn.GroupNorm(32, out_channels))
+        # if norm == "batch":
+        #     layers.append(nn.BatchNorm2d(out_channels))
+        # elif norm == "group":
+        #     layers.append(nn.GroupNorm(in_channels // 8, out_channels))
 
         if act == "relu":
-            layers.append(nn.ReLU())
+            layers.append(nn.ReLU(inplace=True))
         elif act == "silu":
-            layers.append(nn.SiLU())
+            layers.append(nn.SiLU(inplace=True))
         elif act == "sigmoid":
             layers.append(nn.Sigmoid())
         elif act == "softplus":
             layers.append(nn.Softplus())
         elif act == "softmax":
             layers.append(nn.Softmax(dim=1))
+
+        if norm == "batch":
+            layers.append(nn.BatchNorm2d(out_channels))
+        elif norm == "group":
+            layers.append(nn.GroupNorm(in_channels // 8, out_channels))
 
         super().__init__(*layers)
 

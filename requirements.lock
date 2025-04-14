@@ -10,6 +10,8 @@
 #   universal: false
 
 -e file:.
+absl-py==2.1.0
+    # via tensorboard
 contourpy==1.3.1
     # via matplotlib
 cycler==0.12.1
@@ -25,14 +27,19 @@ fonttools==4.55.3
     # via matplotlib
 fsspec==2024.12.0
     # via torch
+grpcio==1.71.0
+    # via tensorboard
 jinja2==3.1.5
     # via torch
 kiwisolver==1.4.8
     # via matplotlib
 lightning-utilities==0.11.9
     # via torchmetrics
+markdown==3.7
+    # via tensorboard
 markupsafe==3.0.2
     # via jinja2
+    # via werkzeug
 matplotlib==3.10.0
     # via sihl
 mpmath==1.3.0
@@ -44,6 +51,7 @@ numpy==2.2.1
     # via faster-coco-eval
     # via matplotlib
     # via pandas
+    # via tensorboard
     # via torchmetrics
     # via torchvision
 nvidia-cublas-cu12==12.4.5.8
@@ -79,6 +87,7 @@ packaging==24.2
     # via lightning-utilities
     # via matplotlib
     # via plotly
+    # via tensorboard
     # via torchmetrics
 pandas==2.2.3
     # via faster-coco-eval
@@ -88,6 +97,8 @@ pillow==11.0.0
     # via torchvision
 plotly==5.24.1
     # via faster-coco-eval
+protobuf==6.30.0
+    # via tensorboard
 pyparsing==3.2.1
     # via matplotlib
 python-dateutil==2.9.0.post0
@@ -97,13 +108,19 @@ pytz==2024.2
     # via pandas
 setuptools==75.6.0
     # via lightning-utilities
+    # via tensorboard
     # via torch
 six==1.17.0
     # via python-dateutil
+    # via tensorboard
 sympy==1.13.1
     # via torch
 tenacity==9.0.0
     # via plotly
+tensorboard==2.19.0
+    # via sihl
+tensorboard-data-server==0.7.2
+    # via tensorboard
 torch==2.5.1
     # via sihl
     # via torchmetrics
@@ -119,3 +136,5 @@ typing-extensions==4.12.2
     # via torch
 tzdata==2024.2
     # via pandas
+werkzeug==3.1.3
+    # via tensorboard

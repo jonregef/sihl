@@ -1,20 +1,22 @@
+from functools import partial
 from typing import Any, Tuple, List, Dict
 
 from einops import rearrange, repeat, reduce
 from torch import nn, Tensor
 from torch.nn import functional
-from torchvision.ops import masks_to_boxes
+from torchmetrics import MeanMetric
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torchvision import ops
 import torch
 
-from sihl.layers import ConvNormAct
-from sihl.utils import coordinate_grid, interpolate
-
-from .object_detection import ObjectDetection
+from sihl.utils import coordinate_grid
+from sihl.heads.object_detection import ObjectDetection
 
 
 class InstanceSegmentation(ObjectDetection):
-    """Instance segmentation is like object detection except instances are associated
-    with a binary mask instead of a bounding box.
+    """Instance segmentation is the prediction of the set of "objects" (pairs of binary
+    mask and the corresponding category) in the input image. You can see it as object
+    detection but instead of bounding boxes we predict binary masks.
 
     Refs:
         1. [CondInst](https://arxiv.org/abs/2102.03026)
@@ -25,36 +27,21 @@ class InstanceSegmentation(ObjectDetection):
         in_channels: List[int],
         num_classes: int,
         bottom_level: int = 3,
-        top_level: int = 7,
+        top_level: int = 5,
         num_channels: int = 256,
         num_layers: int = 4,
         max_instances: int = 100,
-        t_min: float = 0.2,
-        t_max: float = 0.6,
-        topk: int = 7,
-        soft_label_decay_steps: int = 1,
-        mask_top_level: int = 5,
-        mask_num_channels: int = 8,
-        mask_out_channels: int = 1,
     ) -> None:
         """
         Args:
             in_channels (List[int]): Number of channels in input feature maps, sorted by level.
             num_classes (int): Number of possible object categories.
             bottom_level (int, optional): Bottom level of inputs this head is attached to. Defaults to 3.
-            top_level (int, optional): Top level of inputs this head is attached to. Defaults to 7.
+            top_level (int, optional): Top level of inputs this head is attached to. Defaults to 5.
             num_channels (int, optional): Number of convolutional channels. Defaults to 256.
             num_layers (int, optional): Number of convolutional layers. Defaults to 4.
             max_instances (int, optional): Maximum number of instances to predict in a sample. Defaults to 100.
-            t_min (float, optional): Lower bound of O2F parameter t. Defaults to 0.2.
-            t_max (float, optional): Upper bound of O2F parameter t. Defaults to 0.6.
-            topk (int, optional): How many anchors to match to each ground truth object when copmuting the loss. Defaults to 7.
-            soft_label_decay_steps (int, optional): How many training steps to perform before the one-to-few matching becomes one-to-one. Defaults to 1.
-            mask_top_level (int, optional): Top level of inputs masks are computed from. Defaults to 5.
-            mask_num_channels (int, optional): Number of convolutional channels in the mask prediction branch.
-            mask_out_channels (int, optional): Number of output channels in the mask prediction branch.
         """
-        assert top_level >= mask_top_level >= bottom_level
         super().__init__(
             in_channels=in_channels,
             num_classes=num_classes,
@@ -63,104 +50,114 @@ class InstanceSegmentation(ObjectDetection):
             num_channels=num_channels,
             num_layers=num_layers,
             max_instances=max_instances,
-            t_min=t_min,
-            t_max=t_max,
-            topk=topk,
-            soft_label_decay_steps=soft_label_decay_steps,
         )
+        MLP = partial(ops.MLP, norm_layer=nn.LayerNorm, activation_layer=nn.SiLU)
+        Conv = partial(ops.Conv2dNormActivation, activation_layer=nn.SiLU)
 
-        self.mask_top_level = mask_top_level
-        self.mask_num_channels = mask_num_channels
-        self.mask_out_channels = mask_out_channels
-        c, o = mask_num_channels, mask_out_channels
-        controller_out_channels = (c + 2) * c + c + c * c + c + c * o + o
-        self.controller_head = nn.Conv2d(num_channels, controller_out_channels, 1)
-        bl = bottom_level
-        self.bottom_module = ConvNormAct(in_channels[bl], self.mask_num_channels)
+        c = self.mask_num_channels = 8
+        kernel_params = (c + 2) * c + c + c * c + c + c * 1 + 1
+        self.kernel_head = MLP(
+            num_channels, [num_channels for _ in range(num_layers)] + [kernel_params]
+        )
+        self.mask_laterals = nn.ModuleList(
+            [Conv(in_channels[lvl], num_channels, 1) for lvl in self.levels]
+        )
+        self.mask_stem = Conv(num_channels, self.mask_num_channels, 3)
+        scale = 2**bottom_level
         self.output_shapes = {
             "num_instances": ("batch_size",),
             "scores": ("batch_size", max_instances),
             "classes": ("batch_size", max_instances),
-            "masks": ("batch_size", max_instances, f"height/{2**bl}", f"width/{2**bl}"),
+            "masks": ("batch_size", max_instances, f"height/{scale}", f"width/{scale}"),
         }
 
-    def forward(self, inputs: List[Tensor]) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        num_instances, scores, classes, logits = self.forward_logits(inputs)
-        masks = interpolate(logits.sigmoid(), size=inputs[0].shape[2:])
-        return num_instances, scores, classes, masks
-
-    def forward_logits(
-        self, inputs: List[Tensor]
+    def forward(
+        self, inputs: List[Tensor], faster: bool = False
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        scores, reg_features = self.get_features(inputs)
-        scores, pred_classes = scores.max(dim=2)
-        # keep only the top `max_instances`
-        batch_size = scores.shape[0]
+        device = inputs[0].device
+        batch_size, full_size = inputs[0].shape[0], inputs[0].shape[2:]
+        feats = self.get_features(inputs)
+        flat_feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], 1)
+
+        _, _, abs_offsets, abs_scales = self.get_offsets_and_scales(inputs)
+
+        # compute locations
+        loc_logits = self.loc_head(flat_feats).squeeze(2)
+        loc_logits, loc_idxs = loc_logits.topk(self.max_instances, dim=1)
+        scores = loc_logits.sigmoid()
+        num_instances = reduce(scores > 0.5, "b i -> b", "sum")
         batches = repeat(torch.arange(batch_size), f"b -> b {self.max_instances}")
-        instance_idxs = scores.topk(self.max_instances).indices
-        scores = scores[batches, instance_idxs]
-        pred_classes = pred_classes[batches, instance_idxs]
-        num_instances = reduce(scores > self.threshold, "b i -> b", "sum")
+        flat_feats = flat_feats[batches, loc_idxs]
 
-        # compute segmentation masks for the `max_instances` top scoring anchors
-        controllers = self.get_controllers(reg_features)
-        bottom_features = self.get_bottom_features(inputs)
-        normalized_anchors = self.get_anchors(inputs, normalized=True)
-        logits = torch.cat(
-            [
-                self.get_masks(
-                    params=controllers[batch_idx, instance_idxs[batch_idx]],
-                    anchors=normalized_anchors[instance_idxs[batch_idx]],
-                    bottom_features=bottom_features[batch_idx],
-                    num_masks=self.max_instances,
+        # compute classes
+        class_logits = self.class_head(flat_feats)
+        classes = class_logits.max(dim=2).indices
+
+        # compute masks
+        mask_height, mask_width = inputs[self.bottom_level].shape[2:]
+        mask_feats = [
+            functional.interpolate(x, (mask_height, mask_width), mode="bilinear")
+            for x in feats
+        ]
+        mask_feats = self.mask_stem(torch.stack(mask_feats).sum(dim=0))
+        mask_feats = repeat(mask_feats, "b c h w -> b i c h w", i=self.max_instances)
+
+        rel_offsets = [
+            coordinate_grid(*inputs[lvl].shape[2:]).to(device) for lvl in self.levels
+        ]
+        rel_offsets = torch.cat(
+            [repeat(_, "h w c -> b (h w) c", b=batch_size) for _ in rel_offsets], dim=1
+        )
+        rel_offsets = rel_offsets[batches, loc_idxs]
+        grid = coordinate_grid(mask_height, mask_width).to(device)
+        grid = repeat(grid, "h w c -> b i c h w", b=batch_size, i=self.max_instances)
+        grid = grid - rearrange(rel_offsets, "b i c -> b i c 1 1", i=self.max_instances)
+        mask_feats = torch.cat([mask_feats, grid], dim=2)
+
+        if faster:
+            # NOTE: this vectorized implementation is unfortunately not onnx exportable
+            mask_feats = rearrange(mask_feats, "b i c h w -> 1 (b i c) h w")
+            w = self.kernel_head(flat_feats)
+            c = self.mask_num_channels
+            n_groups = batch_size * self.max_instances
+            bic = n_groups * self.mask_num_channels
+            w1 = w[..., (s := slice(0, (c + 2) * c))].reshape(bic, c + 2, 1, 1)
+            b1 = w[..., (s := slice(s.stop, s.stop + c))].reshape(bic)
+            w2 = w[..., (s := slice(s.stop, s.stop + c**2))].reshape(bic, c, 1, 1)
+            b2 = w[..., (s := slice(s.stop, s.stop + c))].reshape(bic)
+            w3 = w[..., (s := slice(s.stop, s.stop + c))].reshape(n_groups, c, 1, 1)
+            b3 = w[..., s.stop :].reshape(n_groups)
+            masks = functional.silu(torch.conv2d(mask_feats, w1, b1, groups=n_groups))
+            masks = functional.silu(torch.conv2d(masks, w2, b2, groups=n_groups))
+            masks = functional.sigmoid(torch.conv2d(masks, w3, b3, groups=n_groups))
+            masks = rearrange(
+                masks, "1 (b i) h w -> b i h w", b=batch_size, i=self.max_instances
+            )
+        else:
+            mask_feats = rearrange(mask_feats, "b i c h w -> b (i c) h w")
+            masks_list = []
+            c = self.mask_num_channels
+            n_groups = self.max_instances
+            bic = n_groups * self.mask_num_channels
+            dynamic_weights = self.kernel_head(flat_feats)
+            for b in range(batch_size):
+                w = dynamic_weights[b]
+                w1 = w[..., (s := slice(0, (c + 2) * c))].reshape(bic, c + 2, 1, 1)
+                b1 = w[..., (s := slice(s.stop, s.stop + c))].reshape(bic)
+                w2 = w[..., (s := slice(s.stop, s.stop + c**2))].reshape(bic, c, 1, 1)
+                b2 = w[..., (s := slice(s.stop, s.stop + c))].reshape(bic)
+                w3 = w[..., (s := slice(s.stop, s.stop + c))].reshape(n_groups, c, 1, 1)
+                b3 = w[..., s.stop :].reshape(n_groups)
+                masks = functional.silu(
+                    torch.conv2d(mask_feats[b : b + 1], w1, b1, groups=n_groups)
                 )
-                for batch_idx in range(batch_size)
-            ]
-        )
-        return num_instances, scores, pred_classes, logits
+                masks = functional.silu(torch.conv2d(masks, w2, b2, groups=n_groups))
+                masks = torch.conv2d(masks, w3, b3, groups=n_groups)
+                masks_list.append(masks[0])
+            masks = torch.stack(masks_list).sigmoid()
 
-    def get_controllers(self, features: List[Tensor]) -> Tensor:
-        controllers = [self.controller_head(_) for _ in features]
-        return torch.cat(
-            [rearrange(_, "n c h w -> n (h w) c") for _ in controllers], dim=1
-        )
-
-    def get_bottom_features(self, inputs: List[Tensor]) -> Tensor:
-        assert len(inputs) > self.top_level
-        x0 = inputs[self.bottom_level]
-        batch_size, _, height, width = x0.shape
-        summed_features = torch.stack(
-            [x0]
-            + [
-                interpolate(inputs[level], size=(height, width))
-                for level in range(self.bottom_level + 1, self.mask_top_level + 1)
-            ]
-        ).sum(dim=0)
-        bottom_feats = self.bottom_module(summed_features)
-        # Absolute coordinates will later be transformed into relative ones
-        abs_coords = coordinate_grid(height, width, y_max=1, x_max=1)
-        abs_coords = repeat(abs_coords, "c h w -> b c h w", b=batch_size, c=2)
-        return torch.cat([bottom_feats, abs_coords.to(bottom_feats)], dim=1)
-
-    def get_masks(
-        self, params: Tensor, anchors: Tensor, bottom_features: Tensor, num_masks: int
-    ) -> Tensor:
-        c, m_c = self.mask_num_channels, num_masks * self.mask_num_channels
-        o, m_o = self.mask_out_channels, num_masks * self.mask_out_channels
-
-        w1 = params[:, (s := slice(0, (c + 2) * c))].reshape(m_c, c + 2, 1, 1)
-        b1 = params[:, (s := slice(s.stop, s.stop + c))].reshape(m_c)
-        w2 = params[:, (s := slice(s.stop, s.stop + c**2))].reshape(m_c, c, 1, 1)
-        b2 = params[:, (s := slice(s.stop, s.stop + c))].reshape(m_c)
-        w3 = params[:, (s := slice(s.stop, s.stop + c * o))].reshape(m_o, c, 1, 1)
-        b3 = params[:, s.stop :].reshape(m_o)
-
-        # Convert abs coords to rel coords by subtracting padded anchors
-        padded_anchors = functional.pad(anchors, (c, 0, 0, 0)).reshape(-1, 1, 1)
-        x = repeat(bottom_features, "c h w -> (n c) h w", n=num_masks) - padded_anchors
-        x = functional.conv2d(x.unsqueeze(0), w1, b1, groups=num_masks).relu()
-        x = functional.conv2d(x, w2, b2, groups=num_masks).relu()
-        return functional.conv2d(x, w3, b3, groups=num_masks)
+        masks = functional.interpolate(masks, full_size, mode="bilinear")
+        return num_instances, scores, classes, masks
 
     def training_step(
         self,
@@ -169,65 +166,115 @@ class InstanceSegmentation(ObjectDetection):
         masks: List[Tensor],
         is_validating: bool = False,
     ) -> Tuple[Tensor, Dict[str, Any]]:
-        boxes = [masks_to_boxes(sample_masks) for sample_masks in masks]
-        scores, reg_features = self.get_features(inputs)
-        controllers = self.get_controllers(reg_features)
-        pred_boxes = self.get_boxes(reg_features)
-        bottom_feats = self.get_bottom_features(inputs)
-        anchors = self.get_anchors(inputs, normalized=False)
-        class_target, box_target, assignment = self.get_targets(
-            anchors, scores, pred_boxes, classes, boxes, is_validating
-        )
-        class_loss, box_loss = self.get_losses(
-            scores, pred_boxes, class_target, box_target
-        )
-        mask_losses = []  # dice loss
-        batch_size = scores.shape[0]
-        normed_anchors = self.get_anchors(inputs, normalized=True)
-        pos_mask = reduce(class_target, "b i s -> b i", "max") == 1.0
+        assert len(inputs) > self.top_level, "too few input levels"
+        device = inputs[0].device
+        batch_size, _, full_height, full_width = inputs[0].shape
+
+        # remove empty masks
+        classes = [
+            _classes[_masks.any(dim=(1, 2))] if _masks.shape[0] > 0 else _classes
+            for _classes, _masks in zip(classes, masks)
+        ]
+        masks = [
+            _masks[_masks.any(dim=(1, 2))] if _masks.shape[0] > 0 else _masks
+            for _masks in masks
+        ]
+        boxes = [ops.masks_to_boxes(mask) for mask in masks]
+        loss, metrics = super().training_step(inputs, classes, boxes, is_validating)
+
+        # compute anchors
+        _, _, abs_offsets, abs_scales = self.get_offsets_and_scales(inputs)
+        directions = torch.tensor([[-1, -1, 1, 1]], device=device)
+        anchors = abs_offsets + directions * abs_scales
+
+        # assign anchors to gt boxes
+        matching_results = [self.bbox_matching(anchors, gt_boxes) for gt_boxes in boxes]
+        assignment = torch.stack([_[0] for _ in matching_results])
+        # o2o_mask = torch.stack([_[1] for _ in matching_results])
+        # o2m_iou = torch.stack([_[2] for _ in matching_results])
+        rel_iou = torch.stack([_[3] for _ in matching_results])
+        o2m_mask = rel_iou > 0
+        o2m_weight = rel_iou[o2m_mask]
+
+        feats = self.get_features(inputs)
+        flat_feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], 1)
+
+        mask_size = inputs[self.bottom_level].shape[2:]
+        mask_feats = [
+            functional.interpolate(x, mask_size, mode="bilinear") for x in feats
+        ]
+        mask_feats = self.mask_stem(torch.stack(mask_feats).sum(dim=0))
+        rel_offsets = [
+            coordinate_grid(*inputs[lvl].shape[2:]).to(device) for lvl in self.levels
+        ]
+        rel_offsets = torch.cat([rearrange(_, "h w c -> (h w) c") for _ in rel_offsets])
+        grid = coordinate_grid(mask_size[0], mask_size[1]).to(device)
+        biased_mask_feats = []
         for batch_idx in range(batch_size):
-            pos_idxs = pos_mask[batch_idx]
-            if masks[batch_idx].numel() == 0 or not torch.any(pos_idxs):
+            loc_idxs = o2m_mask[batch_idx].nonzero()[:, 0]
+            n_objects = loc_idxs.shape[0]
+            if n_objects == 0:
                 continue
-            pred_masks = self.get_masks(
-                params=controllers[batch_idx, pos_idxs],
-                anchors=normed_anchors[pos_idxs],
-                bottom_features=bottom_feats[batch_idx],
-                num_masks=pos_idxs.sum(),
-            ).sigmoid()
-            target_masks = masks[batch_idx][assignment[batch_idx, pos_idxs]]
-            mask_size = (target_masks.shape[1], target_masks.shape[2])  # FIXME ?
-            pred_masks = interpolate(pred_masks, size=mask_size).squeeze(0)
-            numerator = reduce(pred_masks * target_masks, "c h w -> c", "sum")
-            denominator = reduce(pred_masks**2 + target_masks**2, "c h w -> c", "sum")
-            mask_losses.append((1 - 2 * numerator / denominator).nan_to_num(0).mean())
-        mask_loss = torch.stack(mask_losses).mean()
-        return class_loss + box_loss + mask_loss, {
-            "class_loss": class_loss,
-            "box_loss": box_loss,
-            "mask_loss": mask_loss,
-        }
+            _mask_feats = repeat(mask_feats[batch_idx], "c h w -> i c h w", i=n_objects)
+            _rel_offsets = rearrange(rel_offsets[loc_idxs], "i c -> i c 1 1")
+            _grid = repeat(grid, "h w c ->  i c h w", i=n_objects) - _rel_offsets
+            _mask_feats = torch.cat([_mask_feats, _grid], dim=1)
+            _mask_feats = rearrange(_mask_feats, "i c h w -> (i c) h w")
+            biased_mask_feats.append(_mask_feats)
+
+        biased_mask_feats = torch.cat(biased_mask_feats).unsqueeze(0)
+        dyn_weights = self.kernel_head(flat_feats[o2m_mask])
+        n_obj = dyn_weights.shape[0]
+        c = self.mask_num_channels
+        bic = n_obj * c
+        w1 = dyn_weights[:, (s := slice(0, (c + 2) * c))].reshape(bic, c + 2, 1, 1)
+        b1 = dyn_weights[:, (s := slice(s.stop, s.stop + c))].reshape(bic)
+        w2 = dyn_weights[:, (s := slice(s.stop, s.stop + c**2))].reshape(bic, c, 1, 1)
+        b2 = dyn_weights[:, (s := slice(s.stop, s.stop + c))].reshape(bic)
+        w3 = dyn_weights[:, (s := slice(s.stop, s.stop + c))].reshape(n_obj, c, 1, 1)
+        b3 = dyn_weights[:, s.stop :].reshape(n_obj)
+        masks_preds = functional.silu(
+            torch.conv2d(biased_mask_feats, w1, b1, groups=n_obj)
+        )
+        masks_preds = functional.silu(torch.conv2d(masks_preds, w2, b2, groups=n_obj))
+        masks_preds = torch.sigmoid(torch.conv2d(masks_preds, w3, b3, groups=n_obj))
+        masks_preds = masks_preds.squeeze(0)
+        target_masks = torch.cat(
+            [masks[b][assignment[b, o2m_mask[b]]] for b in range(batch_size)]
+        )
+        target_masks = functional.interpolate(
+            target_masks[:, None].to(masks_preds), mask_size, mode="bilinear"
+        )[:, 0]
+        # dice loss
+        numerator = reduce(masks_preds * target_masks, "c h w -> c", "sum")
+        denominator = reduce(masks_preds**2 + target_masks**2, "c h w -> c", "sum")
+        with torch.autocast(device_type="cuda", enabled=False):
+            mask_loss = 1 - 2 * numerator.to(torch.float32) / denominator
+            mask_loss = (o2m_weight * mask_loss.nan_to_num(0)).sum() / o2m_weight.sum()
+        loss = loss + mask_loss
+        metrics["mask_loss"] = mask_loss
+        return loss, metrics
+
+    def on_validation_start(self) -> None:
+        self.loss_computer = MeanMetric(nan_strategy="ignore")
+        max_detection_thresholds = [1, min(self.max_instances, 10), self.max_instances]
+        self.map_computer = MeanAveragePrecision(
+            max_detection_thresholds=max_detection_thresholds,
+            backend="faster_coco_eval",
+            iou_type="segm",
+        )
 
     def validation_step(
         self, inputs: List[Tensor], classes: List[Tensor], masks: List[Tensor]
-    ) -> Tuple[Tensor, Dict[str, Any]]:
+    ) -> Tuple[Tensor, Dict[str, float]]:
+        _, scores, pred_classes, pred_masks = self.forward(inputs, faster=True)
+        self.map_computer.to(scores.device).update(
+            [
+                {"scores": s, "labels": c, "masks": m}
+                for s, c, m in zip(scores, pred_classes, pred_masks > 0.5)
+            ],
+            [{"labels": c, "masks": m > 0.5} for c, m in zip(classes, masks)],
+        )
         loss, metrics = self.training_step(inputs, classes, masks, is_validating=True)
         self.loss_computer.to(loss.device).update(loss)
-        boxes = [masks_to_boxes(sample_masks) for sample_masks in masks]
-        num_instances, scores, pred_classes, pred_masks = self.forward(inputs)
-        map_computer_preds = []
-        for batch_idx, sample_masks in enumerate(pred_masks):
-            non_empty_idxs = torch.any(sample_masks > 0.5, dim=(1, 2))
-            sample_boxes = masks_to_boxes(sample_masks[non_empty_idxs] > 0.5)
-            map_computer_preds.append(
-                {
-                    "scores": scores[batch_idx][non_empty_idxs],
-                    "labels": pred_classes[batch_idx][non_empty_idxs],
-                    "boxes": sample_boxes,
-                }
-            )
-        self.map_computer.to(scores.device).update(
-            map_computer_preds,
-            [{"labels": c.to(torch.int64), "boxes": b} for c, b in zip(classes, boxes)],
-        )
         return loss, metrics

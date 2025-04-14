@@ -54,14 +54,18 @@ def test_forward(model: InstanceSegmentation, backbone_output: List[Tensor]) -> 
 
 
 def test_training_step(
-    model: InstanceSegmentation, backbone_output: List[Tensor], targets: List[List[str]]
+    model: InstanceSegmentation,
+    backbone_output: List[Tensor],
+    targets: List[List[str]],
 ) -> None:
     loss, _ = model.training_step(backbone_output, **targets)
     assert loss.item()
 
 
 def test_validation_step(
-    model: InstanceSegmentation, backbone_output: List[Tensor], targets: List[List[str]]
+    model: InstanceSegmentation,
+    backbone_output: List[Tensor],
+    targets: List[List[str]],
 ) -> None:
     model.on_validation_start()
     loss, _ = model.validation_step(backbone_output, **targets)

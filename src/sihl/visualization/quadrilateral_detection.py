@@ -20,9 +20,7 @@ def _(
     if prediction is not None:
         num_instances, scores, pred_labels, pred_boxes = prediction
         saliency = head.get_saliency(features)
-        saliency = functional.interpolate(
-            saliency.unsqueeze(1), size=input.shape[2:], mode="nearest-exact"
-        )
+        saliency = functional.interpolate(saliency.unsqueeze(1), size=input.shape[2:])
         saliency = saliency.squeeze(1).to("cpu").numpy()
     images = (input.permute(0, 2, 3, 1) * 255).to(torch.uint8).to("cpu").numpy()
     visualizations = []

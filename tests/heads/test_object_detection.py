@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 from torch import Tensor
 import numpy as np
@@ -32,15 +32,17 @@ def backbone_output() -> List[Tensor]:
 
 
 @pytest.fixture()
-def targets() -> Tuple[List[Tensor], List[Tensor]]:
-    NUM_OBJECTS = 10
-    return (
-        [torch.randint(0, NUM_CLASSES, (NUM_OBJECTS,)) for _ in range(BATCH_SIZE)],
-        [
-            torch.randint(0, HEIGHT, (NUM_OBJECTS, 4), dtype=torch.float)
+def targets() -> Dict[str, List[Tensor]]:
+    num_objects = range(BATCH_SIZE)  # tests target with 0 objects too
+    return {
+        "classes": [
+            torch.randint(0, NUM_CLASSES, (num_objects[_],)) for _ in range(BATCH_SIZE)
+        ],
+        "boxes": [
+            torch.randint(0, HEIGHT, (num_objects[_], 4), dtype=torch.float)
             for _ in range(BATCH_SIZE)
         ],
-    )
+    }
 
 
 def test_forward(model: ObjectDetection, backbone_output: List[Tensor]) -> None:
@@ -56,8 +58,8 @@ def test_training_step(
     backbone_output: List[Tensor],
     targets: Tuple[List[Tensor], List[Tensor]],
 ) -> None:
-    loss, _ = model.training_step(backbone_output, *targets)
-    assert loss.item()
+    loss, _ = model.training_step(backbone_output, **targets)
+    assert loss.item() >= 0
 
 
 def test_validation_step(
@@ -66,8 +68,9 @@ def test_validation_step(
     targets: Tuple[List[Tensor], List[Tensor]],
 ) -> None:
     model.on_validation_start()
-    loss, _ = model.validation_step(backbone_output, *targets)
-    assert loss.item()
+    loss, _ = model.validation_step(backbone_output, **targets)
+    assert loss.item() >= 0
+    model.current_step = 1
     metrics = model.on_validation_end()
     assert metrics
 

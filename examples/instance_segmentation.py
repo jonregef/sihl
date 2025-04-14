@@ -1,10 +1,15 @@
 from pathlib import Path
+from typing import List, Tuple
+import json
 import logging
 
+from PIL import Image, ImageDraw
 from rich.logging import RichHandler
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torchinfo import summary
+from torchvision import tv_tensors
+from torchvision.io import ImageReadMode
 import kaggle
 import lightning
 import lightning.pytorch as pl
@@ -14,9 +19,10 @@ import torchvision.transforms.v2 as transforms
 
 from sihl import SihlModel, SihlLightningModule, TorchvisionBackbone
 from sihl.heads import InstanceSegmentation
-from sihl.layers import FPN
+import sihl
 
-coco_labels = [
+
+ALL_COCO_LABELS = [
     "__background__",
     "person",
     "bicycle",
@@ -111,8 +117,8 @@ coco_labels = [
     "hairbrush",
 ]
 
-valid_coco_labels = coco_labels.copy()
-for _ in [
+VALID_COCO_LABELS = ALL_COCO_LABELS.copy()
+for label in [
     "__background__",
     "streetsign",
     "hat",
@@ -126,72 +132,134 @@ for _ in [
     "blender",
     "hairbrush",
 ]:
-    valid_coco_labels.remove(_)
+    VALID_COCO_LABELS.remove(label)
 
 
-def collate_fn(batch):
-    classes, masks = [], []
-    for sample in batch:
-        annot = sample[1]
-        if "labels" in annot and "masks" in annot:
-            sample_classes, sample_masks = [], []
-            for label, mask in zip(annot["labels"], annot["masks"]):
-                if mask.max() > 0:  # ensure no mask is empty
-                    sample_classes.append(valid_coco_labels.index(coco_labels[label]))
-                    sample_masks.append(mask.to(torch.float32))
-            classes.append(torch.tensor(sample_classes))
-            masks.append(torch.stack(sample_masks))
+def coco_segmentation_to_binary_mask(
+    polygons: List[List[float]], height: int, width: int
+) -> Tensor:
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    for polygon in polygons:
+        # Convert flat list [x1,y1,x2,y2,...] to list of tuples [(x1,y1), (x2,y2), ...]
+        polygon_coords = [
+            (polygon[i], polygon[i + 1]) for i in range(0, len(polygon), 2)
+        ]
+        draw.polygon(polygon_coords, fill=1)
+    mask = transforms.functional.pil_to_tensor(mask).to(torch.bool)
+    return mask
+
+
+class CocoInstanceSegmentationDataset(torch.utils.data.Dataset):
+    def __init__(
+        self, data_dir: Path, train: bool = False, image_size: int = 640
+    ) -> None:
+        self.image_size = image_size
+        self.train = train
+        self.data_dir = data_dir
+        self.annots_by_image = {}
+        split = "train" if train else "val"
+        self.image_dir = self.data_dir / f"{split}2017"
+
+        with open(
+            self.data_dir / "annotations_trainval2017" / f"instances_{split}2017.json"
+        ) as f:
+            coco_data = json.load(f)
+
+        image_by_id = {
+            image_annot["id"]: image_annot["file_name"]
+            for image_annot in coco_data["images"]
+        }
+        for annot in coco_data["annotations"]:
+            if annot["iscrowd"]:
+                continue
+            image_name = image_by_id[annot["image_id"]]
+            if not (self.image_dir / image_name).exists():
+                continue
+            image_path = str((self.image_dir / image_name).resolve())
+            if image_path not in self.annots_by_image:
+                self.annots_by_image[image_path] = {"masks": [], "classes": []}
+            self.annots_by_image[image_path]["masks"].append(annot["segmentation"])
+            self.annots_by_image[image_path]["classes"].append(
+                VALID_COCO_LABELS.index(ALL_COCO_LABELS[annot["category_id"]])
+            )
+        self.annots_by_image = list(self.annots_by_image.items())
+        if train:
+            self.transforms = transforms.Compose(
+                [
+                    transforms.ToImage(),
+                    # transforms.RandomPhotometricDistort(),
+                    # transforms.RandomZoomOut(side_range=(1.0, 2.0)),
+                    # transforms.RandomIoUCrop(),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.Resize(image_size - 1, max_size=image_size),
+                    transforms.RandomCrop(image_size, pad_if_needed=True),
+                    transforms.ToDtype(torch.float32, scale=True),
+                ]
+            )
         else:
-            classes.append(torch.tensor([]))
-            masks.append(torch.tensor([]))
-    return torch.stack([_[0] for _ in batch]), {"classes": classes, "masks": masks}
+            self.transforms = transforms.Compose(
+                [
+                    transforms.ToImage(),
+                    transforms.Resize(image_size - 1, max_size=image_size),
+                    transforms.RandomCrop(image_size, pad_if_needed=True),
+                    transforms.ToDtype(torch.float32, scale=True),
+                ]
+            )
+
+    def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor]:
+        image_path, annot = self.annots_by_image[idx]
+        image = torchvision.io.read_image(image_path, mode=ImageReadMode.RGB)
+        annot = {
+            "labels": torch.tensor(annot["classes"], dtype=torch.int64),
+            "masks": tv_tensors.Mask(
+                torch.cat(
+                    [
+                        coco_segmentation_to_binary_mask(
+                            mask, height=image.shape[1], width=image.shape[2]
+                        )
+                        for mask in annot["masks"]
+                    ]
+                )
+            ),
+        }
+        image, annot = self.transforms(tv_tensors.Image(image), annot)
+        return image, {"classes": annot["labels"], "masks": annot["masks"]}
+
+    def __len__(self) -> int:
+        return len(self.annots_by_image)
+
+    @staticmethod
+    def collate_fn(batch):
+        images = torch.stack([_[0] for _ in batch])
+        classes = [_[1]["classes"] for _ in batch]
+        masks = [_[1]["masks"] for _ in batch]
+        return images, {"classes": classes, "masks": masks}
 
 
 class CocoDataModule(pl.LightningDataModule):
-    def __init__(self, batch_size: int = 32) -> None:
+    def __init__(self, batch_size: int) -> None:
         super().__init__()
         self.batch_size = batch_size
-        self.data_dir = Path(__file__).parent / "data"
+        self.data_dir = Path(__file__).parent / "data" / "coco_2017"
+        self.data_dir.mkdir(exist_ok=True)
 
     def prepare_data(self) -> None:
-        if not (self.data_dir / "coco2017").exists():
+        if not self.data_dir.exists():
             kaggle.api.authenticate()
             kaggle.api.dataset_download_files(
-                "awsaf49/coco-2017-dataset", path=self.data_dir, unzip=True, quiet=False
+                "clkmuhammed/microsoft-coco-2017-common-objects-in-context",
+                path=self.data_dir,
+                unzip=True,
+                quiet=False,
             )
 
     def setup(self, stage: str = "") -> None:
-        coco_data_dir = self.data_dir / "coco2017"
-        self.trainset = torchvision.datasets.wrap_dataset_for_transforms_v2(
-            torchvision.datasets.CocoDetection(
-                str(coco_data_dir / "train2017"),
-                str(coco_data_dir / "annotations" / "instances_train2017.json"),
-                transforms=transforms.Compose(
-                    [
-                        transforms.ToImage(),
-                        transforms.Resize(800 - 1, max_size=800),
-                        transforms.RandomCrop(800, pad_if_needed=True),
-                        transforms.RandomHorizontalFlip(),
-                        transforms.ToDtype(torch.float32, scale=True),
-                    ]
-                ),
-            ),
-            target_keys=["masks", "labels"],
+        self.trainset = CocoInstanceSegmentationDataset(
+            self.data_dir, train=True, image_size=HYPERPARAMS["image_size"]
         )
-        self.valset = torchvision.datasets.wrap_dataset_for_transforms_v2(
-            torchvision.datasets.CocoDetection(
-                str(coco_data_dir / "val2017"),
-                str(coco_data_dir / "annotations" / "instances_val2017.json"),
-                transforms=transforms.Compose(
-                    [
-                        transforms.ToImage(),
-                        transforms.Resize(800 - 1, max_size=800),
-                        transforms.RandomCrop(800, pad_if_needed=True),
-                        transforms.ToDtype(torch.float32, scale=True),
-                    ]
-                ),
-            ),
-            target_keys=["masks", "labels"],
+        self.valset = CocoInstanceSegmentationDataset(
+            self.data_dir, train=False, image_size=HYPERPARAMS["image_size"]
         )
 
     def train_dataloader(self) -> DataLoader[tuple[Tensor, Tensor]]:
@@ -200,7 +268,7 @@ class CocoDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=4,
-            collate_fn=collate_fn,
+            collate_fn=CocoInstanceSegmentationDataset.collate_fn,
         )
 
     def val_dataloader(self) -> DataLoader[tuple[Tensor, Tensor]]:
@@ -209,49 +277,67 @@ class CocoDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=4,
-            collate_fn=collate_fn,
+            collate_fn=CocoInstanceSegmentationDataset.collate_fn,
         )
 
 
+STEPS_PER_EPOCH = 7330
+MAX_STEPS = 12 * STEPS_PER_EPOCH
+HYPERPARAMS = {
+    "max_steps": MAX_STEPS,
+    "image_size": 640,
+    "batch_size": 16,
+    "gradient_clip_val": 0.1,
+    "backbone": {"name": "resnet50", "pretrained": True, "frozen_levels": 1},
+    "neck": "HybridEncoder",
+    "neck_kwargs": {"out_channels": 256, "bottom_level": 3, "top_level": 7},
+    "head_kwargs": {"num_channels": 256, "bottom_level": 3, "top_level": 7},
+    "optimizer": "AdamW",
+    "optimizer_kwargs": {"lr": 1e-4, "weight_decay": 1e-4, "backbone_lr_factor": 0.1},
+    "scheduler": "MultiStepLR",
+    "scheduler_kwargs": {"milestones": [8 * STEPS_PER_EPOCH], "gamma": 0.1},
+}
+
 if __name__ == "__main__":
+    FORMAT = "%(message)s"
     logging.basicConfig(
-        level="INFO", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()]
+        level="INFO", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()]
     )
     log = logging.getLogger("rich")
     logger = pl.loggers.TensorBoardLogger(
-        save_dir=Path(__file__).parent / "logs", name="instance_segmentation"
+        save_dir=Path(__file__).parent / "logs",
+        default_hp_metric=False,
+        name="instance_segmentation",
     )
-    lightning.seed_everything(0)
+    lightning.seed_everything(0, workers=True)
 
     trainer = pl.Trainer(
-        max_steps=90_000,
+        max_steps=HYPERPARAMS["max_steps"],
         accelerator="gpu",
         logger=logger,
         callbacks=[pl.callbacks.RichProgressBar(leave=True)],
-        gradient_clip_val=1,
+        gradient_clip_val=HYPERPARAMS["gradient_clip_val"],
         precision="16-mixed",
-        val_check_interval=1000,
+        val_check_interval=0.25,
     )
     with trainer.init_module():
-        backbone = TorchvisionBackbone("resnet50", pretrained=True, frozen_levels=1)
-        neck = FPN(backbone.out_channels, out_channels=256, bottom_level=3, top_level=7)
+        backbone = TorchvisionBackbone(**HYPERPARAMS["backbone"])
+        neck = getattr(sihl.layers, HYPERPARAMS["neck"])(
+            backbone.out_channels, **HYPERPARAMS["neck_kwargs"]
+        )
         head = InstanceSegmentation(
-            in_channels=neck.out_channels,
-            num_classes=len(valid_coco_labels),
-            mask_top_level=5,
-            soft_label_decay_steps=90_000,
+            neck.out_channels,
+            num_classes=len(VALID_COCO_LABELS),
+            **HYPERPARAMS["head_kwargs"],
         )
         model = SihlLightningModule(
             SihlModel(backbone=backbone, neck=neck, heads=[head]),
-            optimizer=torch.optim.SGD,
-            optimizer_kwargs={"lr": 1e-2, "weight_decay": 1e-4, "momentum": 0.9},
-            scheduler=torch.optim.lr_scheduler.MultiStepLR,
-            scheduler_kwargs={
-                "milestones": [60_000, 80_000],
-                "gamma": 0.1,
-                "warmup_batches": 1000,
-            },
-            data_config={"categories": valid_coco_labels},
+            optimizer=getattr(torch.optim, HYPERPARAMS["optimizer"]),
+            optimizer_kwargs=HYPERPARAMS["optimizer_kwargs"],
+            scheduler=getattr(torch.optim.lr_scheduler, HYPERPARAMS["scheduler"]),
+            scheduler_kwargs=HYPERPARAMS["scheduler_kwargs"],
+            data_config={"categories": VALID_COCO_LABELS},
+            hyperparameters=HYPERPARAMS,
         )
 
     log.info(
@@ -263,4 +349,4 @@ if __name__ == "__main__":
             depth=4,
         )
     )
-    trainer.fit(model, datamodule=CocoDataModule(batch_size=16))
+    trainer.fit(model, datamodule=CocoDataModule(batch_size=HYPERPARAMS["batch_size"]))

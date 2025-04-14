@@ -3,11 +3,11 @@ from typing import List
 from einops import rearrange
 from matplotlib import pyplot as plt
 from torch import Tensor
+from torch.nn import functional
 import numpy as np
 import torch
 
 from sihl.heads import AnomalyDetection
-from sihl.utils import interpolate
 
 from .common import get_images, plot_to_numpy
 
@@ -47,7 +47,9 @@ def _(head, config, input, target, features) -> List[np.ndarray]:
     encoded = rearrange(
         head.autoencoder_bottleneck(encoded), "b (c h w) -> b c h w", h=h, w=w
     )
-    ae_output = head.autoencoder_decoder(interpolate(encoded, size=old_size)).to("cpu")
+    ae_output = head.autoencoder_decoder(
+        functional.interpolate(encoded, size=old_size)
+    ).to("cpu")
 
     distance_st, distance_ae, distance_stae = head.compute_distances(features)
     local_anomaly = distance_st.mean(dim=1)
