@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any, Tuple, List, Dict
+from typing import Tuple, List, Dict
 
 from einops import rearrange, repeat, reduce
 from torch import nn, Tensor
@@ -12,6 +12,7 @@ import torch
 from sihl.utils import coordinate_grid
 
 
+# TODO: make normalized
 class ObjectDetection(nn.Module):
     """Object detection is the prediction of the set of "objects" (pairs of axis-aligned
     rectangular bounding boxes and the corresponding category) in the input image.
@@ -148,7 +149,7 @@ class ObjectDetection(nn.Module):
         classes: List[Tensor],
         boxes: List[Tensor],
         is_validating: bool = False,
-    ) -> Tuple[Tensor, Dict[str, Any]]:
+    ) -> Tuple[Tensor, Dict[str, float]]:
         assert len(inputs) > self.top_level, "too few input levels"
         device = inputs[0].device
         batch_size, _, full_height, full_width = inputs[0].shape
@@ -188,7 +189,7 @@ class ObjectDetection(nn.Module):
             box_loss = ops.complete_box_iou_loss(
                 pos_pred_boxes.to(torch.float32), box_target, reduction="none"
             )
-            box_loss = (o2m_weights * box_loss).sum() / o2m_weights.sum()
+            box_loss = 10 * (o2m_weights * box_loss).sum() / o2m_weights.sum()
 
         # compute classification loss
         class_logits = self.class_head(o2m_feats)
@@ -200,7 +201,8 @@ class ObjectDetection(nn.Module):
             class_loss = ops.sigmoid_focal_loss(
                 class_logits, class_target.to(torch.float32), reduction="none"
             )
-            class_loss = (o2m_weights[:, None] * class_loss).sum() / o2m_weights.sum()
+            o2m_weights = o2m_weights.unsqueeze(1)
+            class_loss = 10 * (o2m_weights * class_loss).sum() / o2m_weights.sum()
 
         # compute locations
         loc_logits = self.loc_head(feats).squeeze(2)
@@ -208,7 +210,7 @@ class ObjectDetection(nn.Module):
             loc_loss = functional.binary_cross_entropy_with_logits(
                 loc_logits.to(torch.float32), loc_target, reduction="none"
             )
-            loc_loss = 0.1 * loc_loss.sum().relu() / loc_target.sum()
+            loc_loss = loc_loss.sum().relu() / loc_target.sum()
 
         loss = loc_loss + box_loss + class_loss
         metrics = {
@@ -241,7 +243,7 @@ class ObjectDetection(nn.Module):
         self.loss_computer.to(loss.device).update(loss)
         return loss, metrics
 
-    def on_validation_end(self) -> Dict[str, Any]:
+    def on_validation_end(self) -> Dict[str, float]:
         metrics = {}
         if hasattr(self, "map_computer"):
             metrics = self.map_computer.compute()
@@ -278,6 +280,5 @@ class ObjectDetection(nn.Module):
         best_iou_for_assignment = best_ious_per_gt[max_gt_idxs]
         o2m_rel_iou[valid_mask] = (
             max_ious[valid_mask] / best_iou_for_assignment[valid_mask]
-        )
-        o2m_rel_iou.nan_to_num_(0)
+        ).nan_to_num(0)
         return o2m_assignments, o2o_mask, o2m_iou, o2m_rel_iou
