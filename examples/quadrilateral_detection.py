@@ -154,10 +154,10 @@ class AircraftDataModule(pl.LightningDataModule):
             )
 
     def setup(self, stage: str = "") -> None:
-        # Re-split to 80/20
+        # Re-split to 90/10
         all_idxs = [_.stem for _ in (self.data_dir / "JPEGImages").glob("*.jpg")]
         random.shuffle(all_idxs)
-        split_idxs = int(0.2 * len(all_idxs))
+        split_idxs = int(0.1 * len(all_idxs))
         train_idxs, valid_idxs = all_idxs[split_idxs:], all_idxs[:split_idxs]
         self.trainset = AircraftDataset(self.data_dir, train=True, indices=train_idxs)
         self.valset = AircraftDataset(self.data_dir, train=False, indices=valid_idxs)
@@ -206,7 +206,6 @@ if __name__ == "__main__":
         head = QuadrilateralDetection(
             backbone.out_channels,
             num_classes=len(AIRCRAFT_LABELS),
-            soft_label_decay_steps=MAX_STEPS,
             bottom_level=5,
             top_level=5,
         )

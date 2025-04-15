@@ -16,12 +16,15 @@ def _(
     head: QuadrilateralDetection, config, input, target, features
 ) -> List[np.ndarray]:
     categories = config["categories"] if "categories" in config else None
-    prediction = head(features)
-    if prediction is not None:
-        num_instances, scores, pred_labels, pred_boxes = prediction
-        saliency = head.get_saliency(features)
-        saliency = functional.interpolate(saliency.unsqueeze(1), size=input.shape[2:])
-        saliency = saliency.squeeze(1).to("cpu").numpy()
+    with torch.no_grad():
+        prediction = head.forward(features)
+        if prediction is not None:
+            num_instances, scores, pred_labels, pred_boxes = prediction
+            saliency = head.get_saliency(features)
+            saliency = functional.interpolate(
+                saliency.unsqueeze(1), size=input.shape[2:]
+            )
+            saliency = saliency.squeeze(1).to("cpu").numpy()
     images = (input.permute(0, 2, 3, 1) * 255).to(torch.uint8).to("cpu").numpy()
     visualizations = []
     for batch_idx, image in enumerate(images):
@@ -52,14 +55,15 @@ def _(
             )
 
         axes[1].title.set_text("Target")
-        axes[1].imshow(np.full_like(image, fill_value=255))
+        axes[1].imshow(image, alpha=0.2)
         if target is not None:
             for label, quad in zip(
                 target["classes"][batch_idx], target["quads"][batch_idx]
             ):
                 axes[1].add_patch(get_patch(label.to("cpu"), quad.to("cpu")))
         axes[2].title.set_text("Prediction")
-        axes[2].imshow(saliency[batch_idx], vmin=0, vmax=1)
+        axes[2].imshow(image, alpha=0.2)
+        axes[2].imshow(saliency[batch_idx], vmin=0, vmax=1, alpha=0.5)
         # np.full_like(image, fill_value=255))
         if prediction is not None:
             n = num_instances[batch_idx]
