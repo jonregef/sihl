@@ -304,6 +304,7 @@ class KeypointDetection(ObjectDetection):
                     ),
                 }
                 for b in range(batch_size)
+                if keypoints[b].shape[0] > 0
             ],
             targets=[
                 {
@@ -312,6 +313,7 @@ class KeypointDetection(ObjectDetection):
                     )
                 }
                 for b in range(batch_size)
+                if keypoints[b].shape[0] > 0
             ],
         )
         loss, metrics = self.training_step(
