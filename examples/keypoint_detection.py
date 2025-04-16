@@ -153,9 +153,9 @@ class CocoHumanKeypointDetectionDataset(torch.utils.data.Dataset):
         presence = presence & inside
         keypoints = keypoints * presence.unsqueeze(2)
         # remove instances that have no present keypoint
-        visible_instances = presence.any(dim=1)
-        presence = presence[visible_instances]
-        keypoints = keypoints[visible_instances]
+        # visible_instances = presence.any(dim=1)
+        # presence = presence[visible_instances]
+        # keypoints = keypoints[visible_instances]
         return image, {"keypoints": keypoints, "presence": presence}
 
     def __len__(self) -> int:

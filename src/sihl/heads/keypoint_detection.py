@@ -168,6 +168,12 @@ class KeypointDetection(ObjectDetection):
         device = inputs[0].device
         batch_size, _, full_height, full_width = inputs[0].shape
 
+        # remove degenerate instances (those with no visible keypoint)
+        for b in range(batch_size):
+            non_degenerate_instances = presence[b].any(dim=1)
+            keypoints[b] = keypoints[b][non_degenerate_instances]
+            presence[b] = presence[b][non_degenerate_instances]
+
         boxes = [self.keypoints_to_boxes(*args) for args in zip(keypoints, presence)]
         classes = [torch.zeros_like(b, dtype=torch.int64)[:, 0] for b in boxes]
         loss, metrics = super().training_step(inputs, classes, boxes, is_validating)
@@ -185,6 +191,10 @@ class KeypointDetection(ObjectDetection):
         rel_iou = torch.stack([_[3] for _ in matching_results])
         o2m_mask = rel_iou > 0
         o2m_weight = rel_iou[o2m_mask]
+
+        if not torch.is_nonzero(o2m_mask.sum()):
+            metrics["keypoint_loss"] = metrics["position_loss"] = 0
+            return loss, metrics
 
         feats = self.get_features(inputs)
         flat_feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], 1)
@@ -212,8 +222,8 @@ class KeypointDetection(ObjectDetection):
             _mask_feats = torch.cat([_mask_feats, _grid], dim=1)
             _mask_feats = rearrange(_mask_feats, "i c h w -> (i c) h w")
             biased_mask_feats.append(_mask_feats)
-
         biased_mask_feats = torch.cat(biased_mask_feats).unsqueeze(0)
+
         dyn_weights = self.kernel_head(flat_feats[o2m_mask])
         n_obj = dyn_weights.shape[0]
         c = self.mask_num_channels
@@ -250,7 +260,9 @@ class KeypointDetection(ObjectDetection):
             img_width=full_width,
         )
         with torch.autocast(device_type="cuda", enabled=False):
-            keypoint_loss = ops.sigmoid_focal_loss(masks_preds, target_heatmaps)
+            keypoint_loss = ops.sigmoid_focal_loss(
+                masks_preds, target_heatmaps, reduction="none"
+            )
             o2m_weight = o2m_weight[:, None, None, None]
             keypoint_loss = (o2m_weight * keypoint_loss).sum() / o2m_weight.sum()
 
@@ -268,7 +280,6 @@ class KeypointDetection(ObjectDetection):
         loss = loss + keypoint_loss + position_loss
         metrics["keypoint_loss"] = keypoint_loss
         metrics["position_loss"] = position_loss
-        del metrics["class_loss"]
         return loss, metrics
 
     def on_validation_start(self) -> None:

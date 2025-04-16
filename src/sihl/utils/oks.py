@@ -2,7 +2,6 @@ from typing import Dict, List, Union, Any
 
 from torch import Tensor
 import torch
-import numpy as np
 from torchmetrics import Metric
 
 
@@ -24,7 +23,9 @@ class ObjectKeypointSimilarity(Metric):
         """
         super().__init__()
         self.sigma = 0.07
-        self.thresholds = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
+        self.thresholds = torch.tensor(
+            [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
+        )
         self.add_state("detection_keypoints", default=[], dist_reduce_fx=None)
         self.add_state("detection_scores", default=[], dist_reduce_fx=None)
         self.add_state("groundtruth_keypoints", default=[], dist_reduce_fx=None)
@@ -55,14 +56,12 @@ class ObjectKeypointSimilarity(Metric):
                 boxes = target["boxes"]
                 areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
             else:
-                areas = torch.tensor(
-                    [self._estimate_area(kpts) for kpts in target["keypoints"]],
-                    device=target["keypoints"].device,
-                    dtype=torch.float32,
-                )
+                areas = torch.stack(
+                    [self._estimate_area(kpts) for kpts in target["keypoints"]]
+                ).to(device=target["keypoints"].device)
             self.groundtruth_areas.append(areas)
 
-    def _estimate_area(self, keypoints: Tensor) -> float:
+    def _estimate_area(self, keypoints: Tensor) -> Tensor:
         """
         Estimate object area based on the bounding box of visible keypoints.
 
@@ -74,13 +73,15 @@ class ObjectKeypointSimilarity(Metric):
         """
         vis = keypoints[:, 2] > 0
         if not vis.any():
-            return 1.0
+            return torch.tensor(1.0, device=keypoints.device)
 
         visible_pts = keypoints[vis, :2]
         min_xy = torch.min(visible_pts, dim=0)[0]
         max_xy = torch.max(visible_pts, dim=0)[0]
-        area = float(torch.prod(max_xy - min_xy))
-        return max(area, 1.0)  # Ensure area is never zero
+        area = torch.prod(max_xy - min_xy)
+        return torch.max(
+            area, torch.tensor(1.0, device=keypoints.device)
+        )  # Ensure area is never zero
 
     def _compute_oks_matrix(
         self, pred_kpts: Tensor, gt_kpts: Tensor, gt_areas: Tensor
@@ -113,16 +114,16 @@ class ObjectKeypointSimilarity(Metric):
         )  # (N_pred, N_gt, K)
 
         # Apply visibility mask and compute mean OKS
-        oks_matrix = torch.zeros((N_pred, N_gt), device=pred_kpts.device)
+        vis_expanded = vis.expand(N_pred, -1, -1)  # (N_pred, N_gt, K)
+        valid_oks = oks_per_keypoint * vis_expanded.float()
+        valid_counts = vis_expanded.sum(dim=-1)  # (N_pred, N_gt)
 
-        for i in range(N_pred):
-            for j in range(N_gt):
-                keypoint_vis = vis[0, j]  # (K,)
-                if not keypoint_vis.any():
-                    oks_matrix[i, j] = 0.0
-                    continue
-                valid_oks = oks_per_keypoint[i, j][keypoint_vis]
-                oks_matrix[i, j] = valid_oks.mean()
+        # Avoid division by zero - set OKS to 0 where no visible keypoints
+        oks_matrix = torch.where(
+            valid_counts > 0,
+            valid_oks.sum(dim=-1) / valid_counts,
+            torch.zeros_like(valid_counts, dtype=torch.float32),
+        )
 
         return oks_matrix
 
@@ -148,61 +149,105 @@ class ObjectKeypointSimilarity(Metric):
             List of match dictionaries with match information
         """
         matches = []
-        unmatched_preds = set(range(num_preds))
-        unmatched_gts = set(range(num_gts))
+        device = oks_matrix.device
 
-        oks_copy = oks_matrix.clone()
-        oks_copy[oks_copy < threshold] = 0.0
+        # Initialize unmatched lists
+        unmatched_preds = torch.arange(num_preds, device=device)
+        unmatched_gts = torch.arange(num_gts, device=device)
 
-        # Greedy matching
-        while unmatched_preds and unmatched_gts:
-            valid_oks = oks_copy[list(unmatched_preds), :][:, list(unmatched_gts)]
-            if valid_oks.numel() == 0 or valid_oks.max() <= 0:
+        # Create a mask for valid matches
+        valid_mask = oks_matrix >= threshold
+
+        while len(unmatched_preds) > 0 and len(unmatched_gts) > 0:
+            # Get the submatrix for unmatched predictions and ground truths
+            submatrix = oks_matrix[unmatched_preds][:, unmatched_gts]
+            sub_valid_mask = valid_mask[unmatched_preds][:, unmatched_gts]
+
+            if not sub_valid_mask.any():
                 break
 
-            # Get indices in the subset, then convert to original indices
-            max_val, max_idx = valid_oks.reshape(-1).max(0)
-            max_idx = max_idx.item()
-            pred_idx = list(unmatched_preds)[max_idx // len(unmatched_gts)]
-            gt_idx = list(unmatched_gts)[max_idx % len(unmatched_gts)]
+            # Find the maximum OKS in the submatrix
+            # First flatten the matrix to find global max
+            flat_submatrix = (submatrix * sub_valid_mask.float()).flatten()
+            max_val, flat_max_idx = torch.max(flat_submatrix, dim=0)
+            max_val = max_val.item()
+
+            if max_val <= 0:
+                break
+
+            # Convert flat index to 2D indices
+            gt_sub_size = len(unmatched_gts)
+            pred_sub_idx = flat_max_idx // gt_sub_size
+            gt_sub_idx = flat_max_idx % gt_sub_size
+
+            # Get original indices
+            pred_idx = unmatched_preds[pred_sub_idx].item()
+            gt_idx = unmatched_gts[gt_sub_idx].item()
 
             matches.append(
                 {
                     "pred_idx": pred_idx,
                     "gt_idx": gt_idx,
-                    "oks": float(oks_matrix[pred_idx, gt_idx]),
-                    "score": float(pred_scores[pred_idx]),
+                    "oks": oks_matrix[pred_idx, gt_idx].item(),
+                    "score": pred_scores[pred_idx].item(),
                 }
             )
 
-            unmatched_preds.remove(pred_idx)
-            unmatched_gts.remove(gt_idx)
-            oks_copy[pred_idx, :] = 0
-            oks_copy[:, gt_idx] = 0
+            # Remove matched indices
+            unmatched_preds = unmatched_preds[unmatched_preds != pred_idx]
+            unmatched_gts = unmatched_gts[unmatched_gts != gt_idx]
 
-        for pred_idx in unmatched_preds:
+        # Add unmatched predictions
+        for pred_idx in unmatched_preds.tolist():
             matches.append(
                 {
                     "pred_idx": pred_idx,
                     "gt_idx": -1,
                     "oks": 0.0,
-                    "score": float(pred_scores[pred_idx]),
+                    "score": pred_scores[pred_idx].item(),
                 }
             )
 
-        for gt_idx in unmatched_gts:
-            matches.append({"pred_idx": -1, "gt_idx": gt_idx, "oks": 0.0, "score": 0.0})
+        # Add unmatched ground truths
+        for gt_idx in unmatched_gts.tolist():
+            matches.append(
+                {
+                    "pred_idx": -1,
+                    "gt_idx": gt_idx,
+                    "oks": 0.0,
+                    "score": 0.0,
+                }
+            )
 
         return matches
 
     def compute(self) -> Dict[str, Union[float, Tensor]]:
         total_gt = sum(g.shape[0] for g in self.groundtruth_keypoints)
         if total_gt == 0:
-            return {"AP": 0.0, "AP@0.5": 0.0, "AP@0.75": 0.0, "AR": 0.0}
+            return {
+                "mAP": torch.tensor(0.0),
+                "AP@0.5": torch.tensor(0.0),
+                "AP@0.75": torch.tensor(0.0),
+                "mAR": torch.tensor(0.0),
+            }
+
+        # Convert thresholds to tensor on the correct device
+        if len(self.detection_keypoints) > 0:
+            device = self.detection_keypoints[0].device
+            thresholds = self.thresholds.to(device)
+        else:
+            device = (
+                self.groundtruth_keypoints[0].device
+                if len(self.groundtruth_keypoints) > 0
+                else "cpu"
+            )
+            thresholds = self.thresholds.to(device)
 
         # Process each threshold separately
-        results_by_threshold = {}
-        for threshold in self.thresholds:
+        ap_by_threshold = {}
+        ar_by_threshold = {}
+
+        for threshold in thresholds:
             all_matches = []
             for i in range(len(self.detection_keypoints)):
                 pred_kpts = self.detection_keypoints[i]  # (N_pred, K, 3)
@@ -226,56 +271,65 @@ class ObjectKeypointSimilarity(Metric):
                     threshold, oks_matrix, pred_scores, num_preds, num_gts
                 )
                 all_matches.extend(matches)
+
+            # Filter out unmatched ground truths and sort by score
+            all_matches = [m for m in all_matches if m["pred_idx"] != -1]
             all_matches.sort(key=lambda x: x["score"], reverse=True)
-            results_by_threshold[threshold] = all_matches
 
-        ap_list = []
-        ar_list = []
-        for threshold, matches in results_by_threshold.items():
-            if not matches:
-                ap_list.append(0.0)
-                ar_list.append(0.0)
-                continue
-
-            # Compute precision-recall curve
+            # Calculate precision-recall curve
             tp = 0
             fp = 0
             precisions = []
             recalls = []
 
-            for match in matches:
-                if match["pred_idx"] != -1:  # Actual prediction (not an unmatched GT)
-                    if match["gt_idx"] != -1:
-                        tp += 1
-                    else:
-                        fp += 1
+            for match in all_matches:
+                if match["gt_idx"] != -1 and match["oks"] >= threshold:
+                    tp += 1
+                else:
+                    fp += 1
 
-                    precisions.append(tp / (tp + fp))
-                    recalls.append(tp / total_gt)
+                precisions.append(tp / (tp + fp))
+                recalls.append(tp / total_gt)
 
+            # Calculate AP using precision-recall curve
             if not precisions:
-                ap_list.append(0.0)
-                ar_list.append(0.0)
+                ap_by_threshold[threshold.item()] = 0.0
+                ar_by_threshold[threshold.item()] = 0.0
                 continue
 
-            # Compute AP using 11-point interpolation
-            ap = 0.0
-            for recall_level in np.linspace(0, 1, 11):
-                # Find max precision at recall >= recall_level
-                max_precision = 0.0
-                for i in range(len(recalls)):
-                    if recalls[i] >= recall_level:
-                        max_precision = max(max_precision, precisions[i])
-                ap += max_precision / 11
+            # Convert to tensors for computation
+            precisions = torch.tensor(precisions, device=device)
+            recalls = torch.tensor(recalls, device=device)
 
-            ap_list.append(ap)
-            ar_list.append(tp / total_gt if total_gt > 0 else 0.0)
+            # Ensure precision is monotonically decreasing
+            for i in range(len(precisions) - 1, 0, -1):
+                precisions[i - 1] = torch.max(precisions[i - 1], precisions[i])
 
-        metrics = {"mAP": np.mean(ap_list), "mAR": np.mean(ar_list)}
-        if 0.5 in self.thresholds:
-            metrics["AP@0.5"] = ap_list[self.thresholds.index(0.5)]
-        if 0.75 in self.thresholds:
-            metrics["AP@0.75"] = ap_list[self.thresholds.index(0.75)]
+            # Calculate AP as area under precision-recall curve
+            ap = torch.tensor(0.0, device=device)
+            for i in range(1, len(precisions)):
+                if recalls[i] != recalls[i - 1]:
+                    ap += (recalls[i] - recalls[i - 1]) * precisions[i]
+
+            ap_by_threshold[threshold.item()] = ap.item()
+            ar_by_threshold[threshold.item()] = (
+                recalls[-1].item() if len(recalls) > 0 else 0.0
+            )
+
+        # Calculate final metrics
+        map_value = torch.tensor(
+            sum(ap_by_threshold.values()) / len(ap_by_threshold), device=device
+        )
+        mar_value = torch.tensor(
+            sum(ar_by_threshold.values()) / len(ar_by_threshold), device=device
+        )
+
+        metrics = {
+            "mAP": map_value,
+            "mAR": mar_value,
+            "AP@0.50": torch.tensor(ap_by_threshold[0.5], device=device),
+            "AP@0.75": torch.tensor(ap_by_threshold[0.75], device=device),
+        }
 
         return metrics
 
