@@ -14,7 +14,10 @@ RAINBOW_CMAPS = ["Reds", "Oranges", "Greens", "Blues", "Purples"]
 
 @get_images.register(SceneTextRecognition)
 def _(head, config, input, target, features) -> List[np.ndarray]:
-    prediction = head(features)
+    with torch.no_grad():
+        prediction = head(features)
+        index_map, token_map = head.get_maps(features)
+
     if "tokens" in config:
         tokens = config["tokens"]
     else:
@@ -22,9 +25,10 @@ def _(head, config, input, target, features) -> List[np.ndarray]:
 
     if isinstance(tokens, str):
         tokens = list(tokens)
+
     images = (input.permute(0, 2, 3, 1) * 255).to(torch.uint8).to("cpu").numpy()
-    index_map, token_map = head.get_maps(features)
-    index_map, token_map = index_map.to("cpu").numpy(), token_map.to("cpu").numpy()
+    index_map = index_map.to("cpu").to(torch.float32).numpy()
+    token_map = token_map.to("cpu").to(torch.float32).numpy()
     visualizations = []
 
     for batch, image in enumerate(images):

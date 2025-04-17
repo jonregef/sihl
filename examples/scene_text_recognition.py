@@ -213,12 +213,12 @@ if __name__ == "__main__":
     lightning.seed_everything(0)
 
     trainer = pl.Trainer(
-        max_steps=90_000,
+        max_steps=100_000,
         accelerator="gpu",
         logger=logger,
         callbacks=[pl.callbacks.RichProgressBar(leave=True)],
         precision="16-mixed",
-        gradient_clip_val=1,
+        gradient_clip_val=0.1,
     )
     with trainer.init_module():
         backbone = TorchvisionBackbone("resnet50", pretrained=True)
@@ -226,13 +226,13 @@ if __name__ == "__main__":
             in_channels=backbone.out_channels,
             max_sequence_length=CyrillicDataset.max_length,
             num_tokens=len(CyrillicDataset.tokens),
-            bottom_level=3,
+            bottom_level=2,
             top_level=5,
         )
         model = SihlLightningModule(
             SihlModel(backbone=backbone, neck=None, heads=[head]),
             optimizer=torch.optim.AdamW,
-            optimizer_kwargs={"lr": 1e-3, "weight_decay": 1e-2},
+            optimizer_kwargs={"lr": 1e-4, "weight_decay": 1e-4},
             data_config={"tokens": CyrillicDataset.tokens},
         )
 
@@ -245,4 +245,4 @@ if __name__ == "__main__":
             depth=4,
         )
     )
-    trainer.fit(model, datamodule=CyrillicDataModule(batch_size=128))
+    trainer.fit(model, datamodule=CyrillicDataModule(batch_size=64))
