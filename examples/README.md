@@ -21,10 +21,10 @@ You should get results similar to these:
 | [metric learning](./metric_learning.py) | 5 | Stanford Cars | nearest neighbor accuracy | 0.79 |
 | [multiclass classification](./multiclass_classification.py) | 50 | Stanford Cars | accuracy | 88% |
 | [multilabel classification](./multilabel_classification.py) | 12 | COCO 2017 | accuracy | 0.98 |
-| [object detection](./object_detection.py) | 12 | COCO 2017 | mean average precision (box) | 35% |
+| [object detection](./object_detection.py) | 12 | COCO 2017 | mean average precision (box) | 37% |
 | [panoptic segmentation](./panoptic_segmentation.py) | 12 | COCO 2017 | (box) mean average precision | 0.29 |
-| [quadrilateral detection](./quadrilateral_detection.py) | 10 | Military aircrafts | mean average precision | 0.49 |
+| [quadrilateral detection](./quadrilateral_detection.py) | 185 | Military aircrafts | mean average precision | 66% |
 | [regression](./regression.py) | 10 | Age prediction | mean absolute error | 6 |
-| [scene text recognition](./scene_text_recognition.py) | 50 | Cyrillic text | accuracy | 0.29 |
+| [scene text recognition](./scene_text_recognition.py) | 100 | Cyrillic text | accuracy | 40% |
 | [semantic segmentation](./semantic_segmentation.py) | 12 | COCO 2017 | mean IOU | 0.28 |
 | [view invariance learning](./view_invariance_learning.py) | 30 | Stanford Cars | Froebenius norm | 0.58 |

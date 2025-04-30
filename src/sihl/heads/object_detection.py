@@ -9,10 +9,7 @@ from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchvision import ops
 import torch
 
-from sihl.utils import coordinate_grid
 
-
-# TODO: make normalized
 class ObjectDetection(nn.Module):
     """Object detection is the prediction of the set of "objects" (pairs of axis-aligned
     rectangular bounding boxes and the corresponding category) in the input image.
@@ -33,7 +30,7 @@ class ObjectDetection(nn.Module):
             in_channels (List[int]): Number of channels in input feature maps, sorted by level.
             num_classes (int): Number of possible object categories.
             bottom_level (int, optional): Bottom level of inputs this head is attached to. Defaults to 3.
-            top_level (int, optional): Top level of inputs this head is attached to. Defaults to 7.
+            top_level (int, optional): Top level of inputs this head is attached to. Defaults to 5.
             num_channels (int, optional): Number of convolutional channels. Defaults to 256.
             num_layers (int, optional): Number of convolutional layers. Defaults to 4.
             max_instances (int, optional): Maximum number of instances to predict in a sample. Defaults to 100.
@@ -58,7 +55,7 @@ class ObjectDetection(nn.Module):
         MLP = partial(ops.MLP, norm_layer=nn.LayerNorm, activation_layer=nn.SiLU)
         Conv = partial(ops.Conv2dNormActivation, activation_layer=nn.SiLU)
         self.laterals = nn.ModuleList(
-            [Conv(in_channels[lvl], num_channels, 1) for lvl in self.levels]
+            [Conv(in_channels[level], num_channels, 1) for level in self.levels]
         )
         self.global_context = nn.Sequential(
             Conv(in_channels[self.top_level], num_channels, 1), nn.AdaptiveAvgPool2d(1)
@@ -92,31 +89,31 @@ class ObjectDetection(nn.Module):
             output = torch.maximum(output, scores.squeeze(1))
         return output
 
-    def get_offsets_and_scales(
-        self, inputs: List[Tensor]
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        device, (full_height, full_width) = inputs[0].device, inputs[0].shape[2:]
-        rel_offsets, rel_scales = [], []
-        for level in self.levels:
+    def get_offsets_and_levels(self, inputs: List[Tensor]) -> Tuple[Tensor, Tensor]:
+        device = inputs[0].device
+        rel_offsets, levels = [], []
+        for level in range(self.bottom_level, self.top_level + 1):
             h, w = inputs[level].shape[2:]
-            rel_grid = rearrange(coordinate_grid(h, w).to(device), "h w c -> (h w) c")
-            scale = torch.full((h * w, 1), level / self.top_level, device=device)
+            y_min, x_min = 1 / h / 2, 1 / w / 2
+            ys = torch.linspace(y_min, 1 - y_min, steps=h, device=device)
+            xs = torch.linspace(x_min, 1 - x_min, steps=w, device=device)
+            coordinate_grid = torch.stack(
+                [repeat(xs, "w -> h w", h=h), repeat(ys, "h -> h w", w=w)], dim=2
+            )
+            rel_grid = rearrange(coordinate_grid, "h w c -> (h w) c")
             rel_offsets.append(rel_grid)
-            rel_scales.append(scale)
-        rel_offsets, rel_scales = torch.cat(rel_offsets), torch.cat(rel_scales)
-        abs_offsets = torch.stack(
-            [rel_offsets[:, 0] * full_width, rel_offsets[:, 1] * full_height], dim=1
-        )
-        abs_offsets = repeat(abs_offsets, "i c -> i (2 c)", c=2)
-        abs_scales = repeat(2 ** (rel_scales * self.top_level), "i c -> i (4 c)", c=1)
+            levels.append(
+                torch.full((h * w, 1), level, device=device, dtype=torch.int64)
+            )
+        rel_offsets, levels = torch.cat(rel_offsets), torch.cat(levels)
         rel_offsets = repeat(rel_offsets, "i c -> i (2 c)", c=2)
-        return rel_offsets, rel_scales, abs_offsets, abs_scales
+        return rel_offsets, levels
 
-    def get_features(self, inputs: List[Tensor]) -> Tensor:
+    def get_features(self, inputs: List[Tensor]) -> List[Tensor]:
         global_context = self.global_context(inputs[self.top_level])
         return [
-            lateral(inputs[level]) + global_context
-            for lateral, level in zip(self.laterals, self.levels)
+            lateral(inputs[self.bottom_level + idx]) + global_context
+            for idx, lateral in enumerate(self.laterals)
         ]
 
     def forward(self, inputs: List[Tensor]) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
@@ -124,7 +121,7 @@ class ObjectDetection(nn.Module):
         batch_size, _, full_height, full_width = inputs[0].shape
         feats = self.get_features(inputs)
         feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], dim=1)
-        _, _, abs_offsets, abs_scales = self.get_offsets_and_scales(inputs)
+        rel_offsets, levels = self.get_offsets_and_levels(inputs)
         # compute locations
         loc_logits = self.loc_head(feats).squeeze(2)
         loc_logits, loc_idxs = loc_logits.topk(self.max_instances, dim=1)
@@ -132,15 +129,18 @@ class ObjectDetection(nn.Module):
         scores = loc_logits.sigmoid()
         num_instances = reduce(scores > 0.5, "b i -> b", "sum")
         feats = feats[batches, loc_idxs]
-        # compute boxes
-        offsets = repeat(abs_offsets, "i c -> b i c", b=batch_size)[batches, loc_idxs]
-        scales = repeat(abs_scales, "i c -> b i c", b=batch_size)[batches, loc_idxs]
-        directions = torch.tensor([[[-1, -1, 1, 1]]], device=device)
-        box_preds = self.box_head(feats).exp()
-        box_preds = offsets + directions * scales * box_preds
         # compute classes
         class_logits = self.class_head(feats)
         classes = class_logits.max(dim=2).indices
+        # compute boxes
+        directions = torch.tensor([[[-1, -1, 1, 1]]], device=device)
+        offsets = repeat(rel_offsets, "i c -> b i c", b=batch_size)[batches, loc_idxs]
+        levels = repeat(levels, "i c -> b i c", b=batch_size)[batches, loc_idxs]
+        box_preds = (self.box_head(feats) + levels - self.top_level).sigmoid()
+        box_preds = offsets + directions * box_preds
+        box_preds = box_preds * torch.tensor(
+            [[[full_width, full_height, full_width, full_height]]], device=device
+        )
         return num_instances, scores, classes, box_preds
 
     def training_step(
@@ -153,17 +153,22 @@ class ObjectDetection(nn.Module):
         assert len(inputs) > self.top_level, "too few input levels"
         device = inputs[0].device
         batch_size, _, full_height, full_width = inputs[0].shape
+        full_size = torch.tensor(
+            [[full_width, full_height, full_width, full_height]], device=device
+        )
+
         feats = self.get_features(inputs)
         feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], dim=1)
 
         # compute anchors
-        _, _, abs_offsets, abs_scales = self.get_offsets_and_scales(inputs)
+        rel_offsets, levels = self.get_offsets_and_levels(inputs)
         directions = torch.tensor([[-1, -1, 1, 1]], device=device)
-        anchors = abs_offsets + directions * abs_scales
+        scale = torch.sigmoid(levels - self.top_level)
+        anchors = (rel_offsets + directions * scale) * full_size
 
-        # assign pred boxes to gt boxes
+        # assign anchors to gt objects
         matching_results = [
-            self.bbox_matching(anchors, boxes[b]) for b in range(batch_size)
+            self.bbox_matching(anchors, boxes[b], self.topk) for b in range(batch_size)
         ]
         assignment = torch.stack([_[0] for _ in matching_results])
         o2o_mask = torch.stack([_[1] for _ in matching_results])
@@ -177,17 +182,18 @@ class ObjectDetection(nn.Module):
         o2m_feats = feats[o2m_mask]
 
         # compute box loss
-        box_offsets = torch.cat([abs_offsets[mask] for mask in o2m_mask])
-        box_scales = torch.cat([abs_scales[mask] for mask in o2m_mask])
-        pos_pred_boxes = self.box_head(o2m_feats).exp()
-        pos_pred_boxes = box_offsets + directions * box_scales * pos_pred_boxes
+        offsets = torch.cat([rel_offsets[mask] for mask in o2m_mask])
+        levels = torch.cat([levels[mask] for mask in o2m_mask])
+        box_preds = (self.box_head(o2m_feats) + levels - self.top_level).sigmoid()
+        box_preds = offsets + directions * box_preds
 
         box_target = torch.cat(
             [boxes[b][assignment[b, mask]] for b, mask in enumerate(o2m_mask)]
         )
+        box_target = box_target / full_size
         with torch.autocast(device_type="cuda", enabled=False):
             box_loss = ops.complete_box_iou_loss(
-                pos_pred_boxes.to(torch.float32), box_target, reduction="none"
+                box_preds.to(torch.float32), box_target, reduction="none"
             )
             box_loss = 10 * (o2m_weights * box_loss).sum() / o2m_weights.sum()
 
@@ -204,13 +210,13 @@ class ObjectDetection(nn.Module):
             o2m_weights = o2m_weights.unsqueeze(1)
             class_loss = 10 * (o2m_weights * class_loss).sum() / o2m_weights.sum()
 
-        # compute locations
+        # compute location loss
         loc_logits = self.loc_head(feats).squeeze(2)
         with torch.autocast(device_type="cuda", enabled=False):
             loc_loss = functional.binary_cross_entropy_with_logits(
                 loc_logits.to(torch.float32), loc_target, reduction="none"
             )
-            loc_loss = loc_loss.sum().relu() / loc_target.sum()
+            loc_loss = loc_loss.sum() / loc_target.sum()
 
         loss = loc_loss + box_loss + class_loss
         metrics = {
@@ -253,8 +259,9 @@ class ObjectDetection(nn.Module):
         metrics["loss"] = self.loss_computer.compute()
         return metrics
 
+    @staticmethod
     def bbox_matching(
-        self, anchors: Tensor, gt_boxes: Tensor
+        anchors: Tensor, gt_boxes: Tensor, topk: int
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         device = anchors.device
         num_anchors, num_gt = anchors.shape[0], gt_boxes.shape[0]
@@ -265,7 +272,7 @@ class ObjectDetection(nn.Module):
         if num_gt == 0:
             return o2m_assignments, o2o_mask, o2m_iou, o2m_rel_iou
         ious = ops.complete_box_iou(anchors, gt_boxes)
-        topk_ious, topk_idxs = torch.topk(ious, k=self.topk, dim=0)
+        topk_ious, topk_idxs = torch.topk(ious, k=topk, dim=0)
         is_best_match = torch.zeros((num_anchors, num_gt), dtype=bool, device=device)
         is_best_match.scatter_(0, topk_idxs[0:1], True)
         is_topk_match = torch.zeros((num_anchors, num_gt), dtype=bool, device=device)

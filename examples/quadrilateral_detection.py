@@ -182,6 +182,25 @@ class AircraftDataModule(pl.LightningDataModule):
         )
 
 
+HYPERPARAMS = {
+    "max_steps": 10_000,
+    "image_size": 640,
+    "batch_size": 16,
+    "gradient_clip_val": 1,
+    "backbone": {"name": "resnet50", "pretrained": True, "frozen_levels": 1},
+    "neck": None,
+    "neck_kwargs": {},
+    "head_kwargs": {
+        "num_classes": len(AIRCRAFT_LABELS),
+        "num_channels": 256,
+        "bottom_level": 5,
+        "top_level": 5,
+    },
+    "optimizer": "AdamW",
+    "optimizer_kwargs": {"lr": 1e-4, "weight_decay": 1e-4},
+    "scheduler": "MultiStepLR",
+    "scheduler_kwargs": {"milestones": [7500], "gamma": 0.1},
+}
 if __name__ == "__main__":
     logging.basicConfig(
         level="INFO", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()]
@@ -192,29 +211,26 @@ if __name__ == "__main__":
     )
     lightning.seed_everything(0)
 
-    MAX_STEPS = 5_000
     trainer = pl.Trainer(
-        max_steps=MAX_STEPS,
+        max_steps=HYPERPARAMS["max_steps"],
         accelerator="gpu",
         logger=logger,
         callbacks=[pl.callbacks.RichProgressBar(leave=True)],
-        gradient_clip_val=1,
+        gradient_clip_val=HYPERPARAMS["gradient_clip_val"],
         precision="16-mixed",
     )
     with trainer.init_module():
-        backbone = TorchvisionBackbone("resnet50", pretrained=True)
+        backbone = TorchvisionBackbone(**HYPERPARAMS["backbone"])
         head = QuadrilateralDetection(
-            backbone.out_channels,
-            num_classes=len(AIRCRAFT_LABELS),
-            bottom_level=5,
-            top_level=5,
+            backbone.out_channels, **HYPERPARAMS["head_kwargs"]
         )
         model = SihlLightningModule(
             SihlModel(backbone=backbone, neck=None, heads=[head]),
-            optimizer=torch.optim.SGD,
-            optimizer_kwargs={"lr": 1e-2, "weight_decay": 1e-4, "momentum": 0.9},
-            scheduler=torch.optim.lr_scheduler.MultiStepLR,
-            scheduler_kwargs={"milestones": [MAX_STEPS * 3 // 4], "gamma": 0.1},
+            optimizer=getattr(torch.optim, HYPERPARAMS["optimizer"]),
+            optimizer_kwargs=HYPERPARAMS["optimizer_kwargs"],
+            scheduler=getattr(torch.optim.lr_scheduler, HYPERPARAMS["scheduler"]),
+            scheduler_kwargs=HYPERPARAMS["scheduler_kwargs"],
+            hyperparameters=HYPERPARAMS,
             data_config={"categories": AIRCRAFT_LABELS},
         )
 
@@ -227,4 +243,6 @@ if __name__ == "__main__":
             depth=4,
         )
     )
-    trainer.fit(model, datamodule=AircraftDataModule(batch_size=64))
+    trainer.fit(
+        model, datamodule=AircraftDataModule(batch_size=HYPERPARAMS["batch_size"])
+    )

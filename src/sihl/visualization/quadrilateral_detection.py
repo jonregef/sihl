@@ -58,7 +58,8 @@ def _(
         axes[1].imshow(image, alpha=0.2)
         if target is not None:
             for label, quad in zip(
-                target["classes"][batch_idx], target["quads"][batch_idx]
+                target["classes"][batch_idx],
+                head.canonicalize_and_convexify(target["quads"][batch_idx]),
             ):
                 axes[1].add_patch(get_patch(label.to("cpu"), quad.to("cpu")))
         axes[2].title.set_text("Prediction")

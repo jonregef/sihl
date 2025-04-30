@@ -4,16 +4,16 @@ from typing import Tuple, List, Dict
 from einops import rearrange, repeat, reduce
 from torch import nn, Tensor
 from torch.nn import functional
+from torchmetrics import MeanMetric
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchvision import ops
 import torch
 
-from sihl.utils import coordinate_grid, polygon_iou
-from sihl.heads.object_detection import ObjectDetection
 
-
-class QuadrilateralDetection(ObjectDetection):
-    """Quadrilateral detection is like object detection, expect objects are associated
-    with convex quadrilaterals instead of axis-aligned rectangles."""
+class QuadrilateralDetection(nn.Module):
+    """Quadrilateral detection is the prediction of the set of "objects" (pairs of
+    convex quadrilaterals and the corresponding category) in the input image.
+    """
 
     def __init__(
         self,
@@ -35,32 +35,91 @@ class QuadrilateralDetection(ObjectDetection):
             num_layers (int, optional): Number of convolutional layers. Defaults to 4.
             max_instances (int, optional): Maximum number of instances to predict in a sample. Defaults to 100.
         """
-        super().__init__(
-            in_channels=in_channels,
-            num_classes=num_classes,
-            bottom_level=bottom_level,
-            top_level=top_level,
-            num_channels=num_channels,
-            num_layers=num_layers,
-            max_instances=max_instances,
-        )
+        assert num_classes > 0, num_classes
+        assert len(in_channels) > top_level, (len(in_channels), top_level)
+        assert 0 < bottom_level <= top_level, (bottom_level, top_level)
+        assert num_channels % 4 == 0, num_channels
+        assert num_layers >= 0, num_layers
+        assert max_instances > 0, max_instances
+        super().__init__()
+
+        self.in_channels = in_channels
+        self.num_classes = num_classes
+        self.bottom_level, self.top_level = bottom_level, top_level
+        self.levels = range(bottom_level, top_level + 1)
+        self.num_channels = num_channels
+        self.num_layers = num_layers
+        self.max_instances = max_instances
+        self.topk = 9
 
         MLP = partial(ops.MLP, norm_layer=nn.LayerNorm, activation_layer=nn.SiLU)
-        self.quad_offset_head = MLP(num_channels, [num_channels] * num_layers + [4])
+        Conv = partial(ops.Conv2dNormActivation, activation_layer=nn.SiLU)
+        self.laterals = nn.ModuleList(
+            [Conv(in_channels[level], num_channels, 1) for level in self.levels]
+        )
+        self.global_context = nn.Sequential(
+            Conv(in_channels[self.top_level], num_channels, 1), nn.AdaptiveAvgPool2d(1)
+        )
+        hidden_channels = [num_channels] * num_layers
+        self.loc_head = MLP(num_channels, hidden_channels + [1])
+        self.class_head = MLP(num_channels, hidden_channels + [num_classes])
+        self.quad_head = MLP(num_channels, hidden_channels + [8])
 
         self.output_shapes = {
             "num_instances": ("batch_size",),
-            "scores": ("batch_size", self.max_instances),
-            "classes": ("batch_size", self.max_instances),
-            "quadrilaterals": ("batch_size", self.max_instances, 4, 2),
+            "scores": ("batch_size", max_instances),
+            "classes": ("batch_size", max_instances),
+            "quads": ("batch_size", max_instances, 4, 2),
         }
+
+    def get_saliency(self, inputs: List[Tensor]) -> Tensor:
+        device = inputs[self.bottom_level].device
+        batch_size, _, full_height, full_width = inputs[self.bottom_level].shape
+        output = torch.zeros((batch_size, full_height, full_width), device=device)
+        global_context = rearrange(
+            self.global_context(inputs[self.top_level]), "b c 1 1 -> b 1 c"
+        )
+        for lateral, level in zip(self.laterals, self.levels):
+            height, width = inputs[level].shape[2:]
+            feats = rearrange(lateral(inputs[level]), "b c h w -> b (h w) c")
+            feats = feats + global_context
+            scores = self.loc_head(feats).sigmoid()
+            scores = rearrange(scores, "b (h w) c -> b c h w", h=height, w=width, c=1)
+            scores = functional.interpolate(scores, size=(full_height, full_width))
+            output = torch.maximum(output, scores.squeeze(1))
+        return output
+
+    def get_offsets_and_levels(self, inputs: List[Tensor]) -> Tuple[Tensor, Tensor]:
+        device = inputs[0].device
+        rel_offsets, levels = [], []
+        for level in self.levels:
+            h, w = inputs[level].shape[2:]
+            y_min, x_min = 1 / h / 2, 1 / w / 2
+            ys = torch.linspace(y_min, 1 - y_min, steps=h, device=device)
+            xs = torch.linspace(x_min, 1 - x_min, steps=w, device=device)
+            coordinate_grid = torch.stack(
+                [repeat(xs, "w -> h w", h=h), repeat(ys, "h -> h w", w=w)], dim=2
+            )
+            rel_grid = rearrange(coordinate_grid, "h w c -> (h w) c")
+            rel_offsets.append(rel_grid)
+            levels.append(torch.full((h * w, 1), level, device=device))
+        rel_offsets, levels = torch.cat(rel_offsets), torch.cat(levels)
+        rel_offsets = repeat(rel_offsets, "i c -> i (4 c)", c=2)
+        return rel_offsets, levels
+
+    def get_features(self, inputs: List[Tensor]) -> Tensor:
+        global_context = self.global_context(inputs[self.top_level])
+        return [
+            lateral(inputs[level]) + global_context
+            for lateral, level in zip(self.laterals, self.levels)
+        ]
 
     def forward(self, inputs: List[Tensor]) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         device = inputs[0].device
         batch_size, _, full_height, full_width = inputs[0].shape
         feats = self.get_features(inputs)
         feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], dim=1)
-        _, _, abs_offsets, abs_scales = self.get_offsets_and_scales(inputs)
+        rel_offsets, levels = self.get_offsets_and_levels(inputs)
         # compute locations
         loc_logits = self.loc_head(feats).squeeze(2)
         loc_logits, loc_idxs = loc_logits.topk(self.max_instances, dim=1)
@@ -68,27 +127,18 @@ class QuadrilateralDetection(ObjectDetection):
         scores = loc_logits.sigmoid()
         num_instances = reduce(scores > 0.5, "b i -> b", "sum")
         feats = feats[batches, loc_idxs]
-        # compute boxes
-        offsets = repeat(abs_offsets, "i c -> b i c", b=batch_size)[batches, loc_idxs]
-        scales = repeat(abs_scales, "i c -> b i c", b=batch_size)[batches, loc_idxs]
-        directions = torch.tensor([[[-1, -1, 1, 1]]], device=device)
-        box_preds = self.box_head(feats).exp()
-        box_preds = offsets + directions * scales * box_preds
+        # compute quads
+        offsets = repeat(rel_offsets, "i c -> b i c", b=batch_size)[batches, loc_idxs]
+        levels = repeat(levels, "i c -> b i c", b=batch_size)[batches, loc_idxs]
+        quad_preds = (self.quad_head(feats)).tanh()
+        quad_preds = offsets + quad_preds
+        quad_preds = quad_preds * torch.tensor(
+            [[[full_width, full_height] * 4]], device=device
+        )
+        quad_preds = rearrange(quad_preds, "b i (v d) -> b i v d", v=4, d=2)
         # compute classes
         class_logits = self.class_head(feats)
         classes = class_logits.max(dim=2).indices
-
-        xmin, ymin, xmax, ymax = box_preds.unbind(dim=2)
-        offsets = self.quad_offset_head(feats).sigmoid()
-        quad_preds = torch.stack(
-            [
-                torch.stack([xmin, ymin + offsets[:, :, 0] * (ymax - ymin)], dim=2),
-                torch.stack([xmax - offsets[:, :, 1] * (xmax - xmin), ymin], dim=2),
-                torch.stack([xmax, ymax - offsets[:, :, 2] * (ymax - ymin)], dim=2),
-                torch.stack([xmin + offsets[:, :, 3] * (xmax - xmin), ymax], dim=2),
-            ],
-            dim=2,
-        )
         return num_instances, scores, classes, quad_preds
 
     def training_step(
@@ -99,21 +149,22 @@ class QuadrilateralDetection(ObjectDetection):
         is_validating: bool = False,
     ) -> Tuple[Tensor, Dict[str, float]]:
         assert len(inputs) > self.top_level, "too few input levels"
-
-        boxes = [quads_to_boxes(_) for _ in quads]
         device = inputs[0].device
         batch_size, _, full_height, full_width = inputs[0].shape
         feats = self.get_features(inputs)
         feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], dim=1)
 
         # compute anchors
-        _, _, abs_offsets, abs_scales = self.get_offsets_and_scales(inputs)
+        rel_offsets, levels = self.get_offsets_and_levels(inputs)
         directions = torch.tensor([[-1, -1, 1, 1]], device=device)
-        anchors = abs_offsets + directions * abs_scales
-
-        # assign pred boxes to gt boxes
+        scale = torch.sigmoid(levels - self.top_level)
+        anchors = (rel_offsets[:, :4] + directions * scale) * torch.tensor(
+            [[full_width, full_height] * 2], device=device
+        )
+        # assign anchors to gt boxes
         matching_results = [
-            self.bbox_matching(anchors, boxes[b]) for b in range(batch_size)
+            self.bbox_matching(anchors, self.quads_to_boxes(q), self.topk)
+            for q in quads
         ]
         assignment = torch.stack([_[0] for _ in matching_results])
         o2o_mask = torch.stack([_[1] for _ in matching_results])
@@ -126,20 +177,23 @@ class QuadrilateralDetection(ObjectDetection):
         o2m_weights = rel_iou[o2m_mask]
         o2m_feats = feats[o2m_mask]
 
-        # compute box loss
-        box_offsets = torch.cat([abs_offsets[mask] for mask in o2m_mask])
-        box_scales = torch.cat([abs_scales[mask] for mask in o2m_mask])
-        box_preds = self.box_head(o2m_feats).exp()
-        box_preds = box_offsets + directions * box_scales * box_preds
+        # compute quad loss
+        offsets = torch.cat([rel_offsets[mask] for mask in o2m_mask])
+        levels = torch.cat([levels[mask] for mask in o2m_mask])
+        quad_preds = (self.quad_head(o2m_feats)).tanh()
+        quad_preds = (offsets + quad_preds).clamp(0, 1)
+        quad_preds = rearrange(quad_preds, "i (v d) -> i v d", v=4, d=2)
 
-        box_target = torch.cat(
-            [boxes[b][assignment[b, mask]] for b, mask in enumerate(o2m_mask)]
+        quad_target = torch.cat(
+            [quads[b][assignment[b, mask]] for b, mask in enumerate(o2m_mask)]
+        )
+        quad_target = self.canonicalize_and_convexify(quad_target) / torch.tensor(
+            [[[full_width, full_height]] * 4], device=device
         )
         with torch.autocast(device_type="cuda", enabled=False):
-            box_loss = ops.complete_box_iou_loss(
-                box_preds.to(torch.float32), box_target, reduction="none"
-            )
-            box_loss = 10 * (o2m_weights * box_loss).sum() / o2m_weights.sum()
+            quad_loss = functional.l1_loss(quad_preds, quad_target, reduction="none")
+            quad_loss = quad_loss.sum(dim=(1, 2))
+            quad_loss = 10 * (o2m_weights * quad_loss).sum() / o2m_weights.sum()
 
         # compute classification loss
         class_logits = self.class_head(o2m_feats)
@@ -150,8 +204,7 @@ class QuadrilateralDetection(ObjectDetection):
         with torch.autocast(device_type="cuda", enabled=False):
             class_loss = ops.sigmoid_focal_loss(
                 class_logits, class_target.to(torch.float32), reduction="none"
-            )
-            o2m_weights = o2m_weights.unsqueeze(1)
+            ).sum(dim=1)
             class_loss = 10 * (o2m_weights * class_loss).sum() / o2m_weights.sum()
 
         # compute locations
@@ -160,136 +213,112 @@ class QuadrilateralDetection(ObjectDetection):
             loc_loss = functional.binary_cross_entropy_with_logits(
                 loc_logits.to(torch.float32), loc_target, reduction="none"
             )
-            loc_loss = loc_loss.sum().relu() / loc_target.sum()
+            loc_loss = loc_loss.sum() / loc_target.sum()
 
-        # compute quad loss
-        xmin, ymin, xmax, ymax = box_preds.detach().unbind(dim=1)
-        offsets = self.quad_offset_head(o2m_feats.detach()).sigmoid()
-        quad_preds = torch.stack(
-            [
-                torch.stack([xmin, ymin + offsets[:, 0] * (ymax - ymin)], dim=1),
-                torch.stack([xmin + offsets[:, 1] * (xmax - xmin), ymin], dim=1),
-                torch.stack([xmax, ymin + offsets[:, 2] * (ymax - ymin)], dim=1),
-                torch.stack([xmin + offsets[:, 3] * (xmax - xmin), ymax], dim=1),
-            ],
-            dim=1,
-        )
-        quad_target = torch.cat(
-            [quads[b][assignment[b, mask]] for b, mask in enumerate(o2m_mask)]
-        )
-
-        with torch.autocast(device_type="cuda", enabled=False):
-            """https://arxiv.org/abs/2103.11636"""
-            permutations = []
-            for shift in range(4):
-                shifted_quad = torch.roll(quad_target, shifts=-shift, dims=1)
-                permutations.append(shifted_quad)
-                permutations.append(shifted_quad.flip(dims=(1,)))
-            permutations = torch.stack(permutations, dim=1)  # (N, 8, 4, 2)
-            quad_preds = quad_preds.unsqueeze(1).repeat_interleave(8, dim=1)
-            full_size = torch.tensor([[[[full_width, full_height]]]], device=device)
-            quad_target = permutations / full_size
-            quad_preds = quad_preds / full_size
-            quad_loss = functional.smooth_l1_loss(
-                quad_preds, quad_target, reduction="none"
-            )
-            # average loss over quad vertices and space, take minimum of permutations
-            quad_loss = quad_loss.mean((1, 2)).min(1).values
-            quad_loss = (o2m_weights * quad_loss).sum() / o2m_weights.sum()
-
-        loss = loc_loss + box_loss + class_loss + quad_loss
+        loss = loc_loss + quad_loss + class_loss
         metrics = {
             "location_loss": loc_loss,
-            "box_loss": box_loss,
-            "class_loss": class_loss,
             "quad_loss": quad_loss,
+            "class_loss": class_loss,
         }
         return loss, metrics
+
+    def on_validation_start(self) -> None:
+        self.loss_computer = MeanMetric(nan_strategy="ignore")
+        max_detection_thresholds = [1, min(self.max_instances, 10), self.max_instances]
+        self.map_computer = MeanAveragePrecision(
+            max_detection_thresholds=max_detection_thresholds,
+            backend="faster_coco_eval",
+        )
 
     def validation_step(
         self, inputs: List[Tensor], classes: List[Tensor], quads: List[Tensor]
     ) -> Tuple[Tensor, Dict[str, float]]:
-        num_instances, scores, pred_classes, pred_quads = self.forward(inputs)
-        self.map_computer.to(pred_quads.device).update(
+        num_instances, scores, pred_classes, quad_preds = self.forward(inputs)
+        b, i, _, _ = quad_preds.shape
+        box_preds = self.quads_to_boxes(
+            rearrange(quad_preds, "b i v c -> (b i) v c", v=4, c=2)
+        )
+        box_preds = rearrange(box_preds, "(b i) v -> b i v", b=b, i=i, v=4)
+        boxes = [self.quads_to_boxes(_) for _ in quads]
+        self.map_computer.to(scores.device).update(
             [
                 {"scores": s, "labels": c, "boxes": b}
-                for s, c, b in zip(scores, pred_classes, quads_to_boxes(pred_quads))
+                for s, c, b in zip(scores, pred_classes, box_preds)
             ],
-            [{"labels": c, "boxes": quads_to_boxes(q)} for c, q in zip(classes, quads)],
+            [{"labels": c, "boxes": b} for c, b in zip(classes, boxes)],
         )
         loss, metrics = self.training_step(inputs, classes, quads, is_validating=True)
         self.loss_computer.to(loss.device).update(loss)
         return loss, metrics
 
+    def on_validation_end(self) -> Dict[str, float]:
+        metrics = {}
+        if hasattr(self, "map_computer"):
+            metrics = self.map_computer.compute()
+            for key in list(metrics.keys()):
+                if "per_class" in key or key in {"classes", "ious"}:
+                    del metrics[key]
+        metrics["loss"] = self.loss_computer.compute()
+        return metrics
 
-def quads_to_boxes(quads):
-    x, y = quads[..., 0], quads[..., 1]
-    return torch.stack([x.min(-1)[0], y.min(-1)[0], x.max(-1)[0], y.max(-1)[0]], dim=-1)
+    @staticmethod
+    def bbox_matching(
+        anchors: Tensor, gt_boxes: Tensor, topk: int
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        device = anchors.device
+        num_anchors, num_gt = anchors.shape[0], gt_boxes.shape[0]
+        o2m_assignments = torch.full((num_anchors,), -1, device=device)
+        o2o_mask = torch.zeros((num_anchors,), dtype=torch.bool, device=device)
+        o2m_iou = torch.zeros((num_anchors,), device=device)
+        o2m_rel_iou = torch.zeros((num_anchors,), device=device)
+        if num_gt == 0:
+            return o2m_assignments, o2o_mask, o2m_iou, o2m_rel_iou
+        ious = ops.complete_box_iou(anchors, gt_boxes)
+        topk_ious, topk_idxs = torch.topk(ious, k=topk, dim=0)
+        is_best_match = torch.zeros((num_anchors, num_gt), dtype=bool, device=device)
+        is_best_match.scatter_(0, topk_idxs[0:1], True)
+        is_topk_match = torch.zeros((num_anchors, num_gt), dtype=bool, device=device)
+        is_topk_match.scatter_(0, topk_idxs, True)
+        max_ious, max_gt_idxs = torch.max(ious * is_topk_match.float(), dim=1)
+        valid_mask = is_topk_match.any(dim=1)
+        o2m_assignments[valid_mask] = max_gt_idxs[valid_mask]
+        o2o_mask = is_best_match.any(dim=1)
+        o2m_iou[valid_mask] = max_ious[valid_mask]
+        # compute relative iou
+        best_ious_per_gt = topk_ious[0]
+        best_iou_for_assignment = best_ious_per_gt[max_gt_idxs]
+        o2m_rel_iou[valid_mask] = (
+            max_ious[valid_mask] / best_iou_for_assignment[valid_mask]
+        ).nan_to_num(0)
+        return o2m_assignments, o2o_mask, o2m_iou, o2m_rel_iou
 
+    @staticmethod
+    def canonicalize_and_convexify(quads: Tensor) -> Tensor:
+        # sort vertices by angle around centroid
+        centroid = reduce(quads, "n v c -> n 1 c", "mean", v=4, c=2)
+        rel = quads - centroid
+        angles = torch.atan2(rel[..., 1], rel[..., 0])
+        _, order = angles.sort(dim=1)
+        idx = repeat(order, "n v -> n v c", v=4, c=2)
+        v = torch.gather(quads, 1, idx)
+        v_next = v[:, [1, 2, 3, 0], :]
+        v_prev = v[:, [3, 0, 1, 2], :]
+        # concavity detection via cross-product
+        cross = (v_next[..., 0] - v[..., 0]) * (v_prev[..., 1] - v[..., 1]) - (
+            (v_next[..., 1] - v[..., 1]) * (v_prev[..., 0] - v[..., 0])
+        )
+        concave_mask = cross < 0
+        # replace concave vertices with neighbor midpoint
+        mid = (v_prev + v_next) * 0.5
+        mask = rearrange(concave_mask, "n v -> n v 1", v=4)
+        v_fixed = torch.where(mask, mid, v)
+        return v_fixed
 
-def line_equation(p1: Tensor, p2: Tensor) -> Tuple[float, float, float]:
-    """find (a, b, c) such that ax + by + c = 0"""
-    a, b, c = p2[1] - p1[1], p1[0] - p2[0], p2[0] * p1[1] - p1[0] * p2[1]
-    return a, b, c
-
-
-def inside_polygon(points: Tensor, polygon: Tensor) -> Tensor:
-    """A point is inside a polygon if it is inside all edges' half-planes.
-    N points (N, 2), 1 M-sided polygon (M, 2) -> (N,) bool
-    """
-    m = polygon.shape[0]
-    edges = [line_equation(polygon[i], polygon[(i + 1) % m]) for i in range(m)]
-    inside = [a * points[:, 0] + b * points[:, 1] + c >= 0 for (a, b, c) in edges]
-    return torch.stack(inside).all(dim=0)
-
-
-def uncross(quadrilaterals: Tensor) -> Tensor:
-    """Take arbitrary quadrilaterals and reorder their vertices according to their angle
-    to the topmost vertex.
-
-    Args:
-        quadrilaterals (Tensor[N, 4, 2]): A batch of quadrilaterals.
-
-    Returns:
-        Tensor[N, 4, 2]: The same batch of quadrilaterals, with vertices re-ordered.
-    """
-    n = quadrilaterals.shape[0]
-    topmost_idxs = torch.argmin(quadrilaterals[:, :, 1], dim=1)
-    topmost_points = quadrilaterals[torch.arange(n), topmost_idxs].unsqueeze(1)
-    shifted = quadrilaterals - topmost_points
-    angles = torch.atan2(shifted[:, :, 1], shifted[:, :, 0])
-    angles = torch.where(angles < 0, angles + 2 * torch.pi, angles)  # wrap angles
-    # set the angle of the topmost vertex to -1 to ensure it's first after sorting
-    angles[torch.arange(n), topmost_idxs] = -1  # FIXME: do not mutate
-    _, sorted_indices = torch.sort(angles, dim=1)
-    reordered = torch.gather(
-        quadrilaterals, 1, sorted_indices.unsqueeze(-1).expand(-1, -1, 2)
-    )
-    return reordered
-
-
-def convexify(quadrilaterals: Tensor) -> Tensor:
-    """Take arbitrary quadrilaterals and convexify them.
-
-    Args:
-        quadrilaterals (Tensor[N, 4, 2]): A batch of quadrilaterals.
-
-    Returns:
-        Tensor[N, 4, 2]: The same batch of quadrilaterals, with vertices re-ordered
-        and adjusted for concave quadrilaterals.
-    """
-    uncrossed = uncross(quadrilaterals)
-    edges = torch.roll(uncrossed, -1, dims=1) - uncrossed
-    cross_products = (
-        edges[:, :, 0] * torch.roll(edges, -1, dims=1)[:, :, 1]
-        - edges[:, :, 1] * torch.roll(edges, -1, dims=1)[:, :, 0]
-    )
-    # For concave quads, replace the point opposite (idx 2) to the pivot (idx 0)
-    # with the center of the segment bounded by the two other points (idxs 1 & 3)
-    is_concave = torch.any(cross_products < 0, dim=1).reshape(-1, 1, 1)
-    center_points = is_concave * ((uncrossed[:, 1] + uncrossed[:, 3]) / 2).unsqueeze(1)
-    zeros = torch.zeros_like(center_points)
-    center_points = torch.cat([zeros, zeros, center_points, zeros], dim=1)
-    # replace c with c': [a,b,c',d] = [a,b,c,d] * [1,1,0,1] + [0,0,c',0]
-    uncrossed = uncrossed * (~center_points.to(torch.bool)) + center_points
-    return uncrossed
+    @staticmethod
+    def quads_to_boxes(quads: Tensor) -> Tensor:
+        x, y = quads[..., 0], quads[..., 1]
+        boxes = torch.stack(
+            [x.min(-1).values, y.min(-1).values, x.max(-1).values, y.max(-1).values], 1
+        )
+        return boxes

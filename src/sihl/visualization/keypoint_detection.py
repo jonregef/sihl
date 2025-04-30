@@ -2,6 +2,7 @@ from typing import List
 
 from matplotlib import patches
 from matplotlib import pyplot as plt
+from torch.nn import functional
 import numpy as np
 import torch
 
@@ -21,6 +22,9 @@ def get_rectangle_patch(box, color):
 def _(head, config, input, target, features) -> List[np.ndarray]:
     keypoint_labels = config["keypoints"] if "keypoints" in config else []
     keypoint_links = config["links"] if "links" in config else []
+    saliency = head.get_saliency(features).detach()
+    saliency = functional.interpolate(saliency.unsqueeze(1), size=input.shape[2:])
+    saliency = saliency.squeeze(1).to("cpu").numpy()
 
     with torch.no_grad():
         num_instances, scores, keypoint_scores, pred_keypoints = head.forward(features)
@@ -61,6 +65,7 @@ def _(head, config, input, target, features) -> List[np.ndarray]:
 
         axes[2].title.set_text("Prediction")
         axes[2].imshow(image, alpha=0.2)
+        axes[2].imshow(saliency[batch_idx], vmin=0, vmax=1, cmap="Reds", alpha=0.5)
         if pred_keypoints is not None:
             for instance_idx in range(num_instances[batch_idx]):
                 presence = keypoint_scores[batch_idx, instance_idx].to("cpu")
