@@ -16,6 +16,7 @@ import torchvision
 from sihl import SihlModel, SihlLightningModule, TorchvisionBackbone
 from sihl.heads import SceneTextRecognition
 from sihl.utils import random_pad
+import sihl
 
 
 def collate_fn(batch: List[Tuple[Tensor, Dict]]):
@@ -138,7 +139,13 @@ class CyrillicDataset(torch.utils.data.Dataset[Tuple[Tensor, bool]]):
         "№",
     ]
 
-    def __init__(self, data_dir: Path, split: Literal["test", "train"]) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        split: Literal["test", "train"],
+        image_size: Tuple[int, int],
+    ) -> None:
+        self.image_size = image_size
         self.images: List[Tuple[Path, str]] = []
         images_dir = data_dir / split
         with open(data_dir / f"{split}.tsv") as f:
@@ -153,7 +160,9 @@ class CyrillicDataset(torch.utils.data.Dataset[Tuple[Tensor, bool]]):
         image = torchvision.io.read_image(
             str(image_path.resolve()), torchvision.io.ImageReadMode.RGB
         )
-        image = random_pad(image, target_size=(64, 256), fill=0).to(torch.float) / 255
+        image = random_pad(image, target_size=self.image_size, fill=0)
+        image = image.to(torch.float) / 255.0
+
         target = torch.tensor([self.tokens.index(char) for char in target])
         return image, target
 
@@ -162,9 +171,10 @@ class CyrillicDataset(torch.utils.data.Dataset[Tuple[Tensor, bool]]):
 
 
 class CyrillicDataModule(pl.LightningDataModule):
-    def __init__(self, batch_size: int = 32) -> None:
+    def __init__(self, batch_size: int, image_size: Tuple[int, int]) -> None:
         super().__init__()
         self.batch_size = batch_size
+        self.image_size = image_size
         self.data_dir = Path(__file__).parent / "data" / "Cyrillic"
 
     def prepare_data(self) -> None:
@@ -178,8 +188,12 @@ class CyrillicDataModule(pl.LightningDataModule):
             )
 
     def setup(self, stage: str = "fit") -> None:
-        self.trainset = CyrillicDataset(self.data_dir, split="train")
-        self.valset = CyrillicDataset(self.data_dir, split="test")
+        self.trainset = CyrillicDataset(
+            self.data_dir, split="train", image_size=self.image_size
+        )
+        self.valset = CyrillicDataset(
+            self.data_dir, split="test", image_size=self.image_size
+        )
 
     def train_dataloader(self) -> DataLoader[Tuple[Tensor, bool]]:
         return DataLoader(
@@ -202,6 +216,30 @@ class CyrillicDataModule(pl.LightningDataModule):
         )
 
 
+STEPS_PER_EPOCH = 1129
+EPOCHS = 100
+HYPERPARAMS = {
+    "max_steps": EPOCHS * STEPS_PER_EPOCH,
+    "image_size": (64, 256),
+    "batch_size": 64,
+    "gradient_clip_val": 0.1,
+    "backbone": {"name": "resnet50", "pretrained": True},
+    "head_kwargs": {
+        "num_channels": 256,
+        "max_sequence_length": CyrillicDataset.max_length,
+        "num_tokens": len(CyrillicDataset.tokens),
+        "bottom_level": 1,
+        "top_level": 5,
+    },
+    "optimizer": "AdamW",
+    "optimizer_kwargs": {"lr": 1e-3, "weight_decay": 1e-2},
+    "scheduler": "OneCycleLR",
+    "scheduler_kwargs": {
+        "max_lr": 1e-3,
+        "epochs": EPOCHS,
+        "steps_per_epoch": STEPS_PER_EPOCH,
+    },
+}
 if __name__ == "__main__":
     logging.basicConfig(
         level="INFO", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()]
@@ -213,26 +251,28 @@ if __name__ == "__main__":
     lightning.seed_everything(0)
 
     trainer = pl.Trainer(
-        max_steps=100_000,
+        max_steps=HYPERPARAMS["max_steps"],
         accelerator="gpu",
         logger=logger,
         callbacks=[pl.callbacks.RichProgressBar(leave=True)],
         precision="16-mixed",
-        gradient_clip_val=0.1,
+        gradient_clip_val=HYPERPARAMS["gradient_clip_val"],
     )
     with trainer.init_module():
-        backbone = TorchvisionBackbone("resnet50", pretrained=True)
+        backbone = TorchvisionBackbone(**HYPERPARAMS["backbone"])
+        # neck = getattr(sihl.layers, HYPERPARAMS["neck"])(
+        #     backbone.out_channels, **HYPERPARAMS["neck_kwargs"]
+        # )
         head = SceneTextRecognition(
-            in_channels=backbone.out_channels,
-            max_sequence_length=CyrillicDataset.max_length,
-            num_tokens=len(CyrillicDataset.tokens),
-            bottom_level=2,
-            top_level=5,
+            in_channels=backbone.out_channels, **HYPERPARAMS["head_kwargs"]
         )
         model = SihlLightningModule(
             SihlModel(backbone=backbone, neck=None, heads=[head]),
-            optimizer=torch.optim.AdamW,
-            optimizer_kwargs={"lr": 1e-4, "weight_decay": 1e-4},
+            optimizer=getattr(torch.optim, HYPERPARAMS["optimizer"]),
+            optimizer_kwargs=HYPERPARAMS["optimizer_kwargs"],
+            scheduler=getattr(torch.optim.lr_scheduler, HYPERPARAMS["scheduler"]),
+            scheduler_kwargs=HYPERPARAMS["scheduler_kwargs"],
+            hyperparameters=HYPERPARAMS,
             data_config={"tokens": CyrillicDataset.tokens},
         )
 
@@ -245,4 +285,9 @@ if __name__ == "__main__":
             depth=4,
         )
     )
-    trainer.fit(model, datamodule=CyrillicDataModule(batch_size=64))
+    trainer.fit(
+        model,
+        datamodule=CyrillicDataModule(
+            batch_size=HYPERPARAMS["batch_size"], image_size=HYPERPARAMS["image_size"]
+        ),
+    )

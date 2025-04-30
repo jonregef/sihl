@@ -52,8 +52,17 @@ class SceneTextRecognition(nn.Module):
         self.laterals = nn.ModuleList(
             [Conv(in_channels[level], num_channels, 1) for level in self.levels]
         )
-        self.class_head = nn.Conv2d(num_channels, num_tokens + 1, 1)
-        self.index_head = nn.Conv2d(num_channels, max_sequence_length, 1)
+        self.global_context = nn.Sequential(
+            Conv(in_channels[self.top_level], num_channels, 1), nn.AdaptiveAvgPool2d(1)
+        )
+        self.class_head = nn.Sequential(
+            Conv(num_channels, num_channels), nn.Conv2d(num_channels, num_tokens + 1, 1)
+        )
+        self.index_head = nn.Sequential(
+            Conv(num_channels, num_channels),
+            nn.Conv2d(num_channels, max_sequence_length, 1),
+        )
+
         self.output_shapes = {
             "scores": ("batch_size", max_sequence_length),
             "tokens": ("batch_size", max_sequence_length),
@@ -61,12 +70,13 @@ class SceneTextRecognition(nn.Module):
 
     def get_features(self, inputs: List[Tensor]) -> Tensor:
         size = inputs[self.bottom_level].shape[2:]
-        return torch.stack(
-            [
-                functional.interpolate(lateral(inputs[level]), size, mode="bilinear")
-                for level, lateral in zip(self.levels, self.laterals)
-            ]
-        ).sum(dim=0)
+        global_context = self.global_context(inputs[self.top_level])
+        interpolate = partial(functional.interpolate, size=size, mode="bilinear")
+        xs = [
+            interpolate(lateral(inputs[level]) + global_context)
+            for lateral, level in zip(self.laterals, self.levels)
+        ]
+        return torch.stack(xs, dim=0).sum(dim=0)
 
     def get_maps(self, inputs: List[Tensor]) -> Tuple[Tensor, Tensor]:
         x = self.get_features(inputs)
