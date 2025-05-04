@@ -22,7 +22,6 @@ Each head corresponds to a task:
 
 - [Anomaly detection](./examples/anomaly_detection.py)
 - [Autoencoding](./examples/autoencoding.py)
-- [Autoregressive text recognition](./examples/autoregressive_text_recognition.py)
 - [Depth estimation](./examples/depth_estimation.py)
 - [Instance segmentation](./examples/instance_segmentation.py)
 - [Keypoint detection](./examples/keypoint_detection.py)
@@ -33,8 +32,8 @@ Each head corresponds to a task:
 - [Panoptic segmentation](./examples/panoptic_segmentation.py)
 - [Quadrilateral detection](./examples/quadrilateral_detection.py)
 - [Regression](./examples/regression.py)
-- [Scene text recognition](./examples/scene_text_recognition.py)
 - [Semantic segmentation](./examples/semantic_segmentation.py)
+- [Text recognition](./examples/text_recognition.py)
 - [View invariance learning](./examples/view_invariance_learning.py)
 
 ## Development

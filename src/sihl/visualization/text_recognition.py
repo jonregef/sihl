@@ -4,14 +4,14 @@ from matplotlib import pyplot as plt
 import numpy as np
 import torch
 
-from sihl.heads import AutoregressiveTextRecognition
+from sihl.heads import TextRecognition
 
 from .common import get_images, plot_to_numpy
 
 
-@get_images.register(AutoregressiveTextRecognition)
+@get_images.register(TextRecognition)
 def _(head, config, input, target, features) -> List[np.ndarray]:
-    prediction = head(features)
+    scores, prediction = head.forward(features)
     if "tokens" in config:
         tokens = config["tokens"]
     else:

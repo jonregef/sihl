@@ -14,7 +14,6 @@ You should get results similar to these:
 | :--- | :---: | :---: | :---: | :---: |
 | [anomaly detection](./anomaly_detection.py) | 300 | MVTEC cable | accuracy | 0.72 |
 | [autoencoding](./autoencoding.py) | 200 | Stanford Cars | mean absolute error | 0.06 |
-| [autoregressive text recognition](./autoregressive_text_regression.py) | 50 | Cyrillic text | accuracy | 0.37 |
 | [depth estimation](./depth_estimation.py) | 30 | NYU V2 | mean absolute error | 0.35 |
 | [instance segmentation](./instance_segmentation.py) | 12 | COCO 2017 | mean average precision (mask) | 30% |
 | [keypoint detection](./keypoint_detection.py) | 12 | COCO 2017 | mean average precision (pose) | NA |
@@ -25,6 +24,6 @@ You should get results similar to these:
 | [panoptic segmentation](./panoptic_segmentation.py) | 12 | COCO 2017 | (box) mean average precision | 0.29 |
 | [quadrilateral detection](./quadrilateral_detection.py) | 185 | Military aircrafts | mean average precision | 66% |
 | [regression](./regression.py) | 10 | Age prediction | mean absolute error | 6 |
-| [scene text recognition](./scene_text_recognition.py) | 100 | Cyrillic text | accuracy | 40% |
 | [semantic segmentation](./semantic_segmentation.py) | 12 | COCO 2017 | mean IOU | 0.28 |
+| [text recognition](./text_regression.py) | 100 | Cyrillic text | accuracy | 43% |
 | [view invariance learning](./view_invariance_learning.py) | 30 | Stanford Cars | Froebenius norm | 0.58 |

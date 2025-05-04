@@ -9,7 +9,7 @@ import onnxruntime
 import pytest
 import torch
 
-from sihl.heads import AutoregressiveTextRecognition
+from sihl.heads import TextRecognition
 
 ALPHABET = string.ascii_lowercase
 BATCH_SIZE, NUM_CHANNELS, HEIGHT, WIDTH = 4, 256, 128, 128
@@ -18,8 +18,8 @@ ONNX_VERSION, ONNX_FILE_NAME = 18, "autoregressive_text_recognition.onnx"
 
 
 @pytest.fixture()
-def model() -> AutoregressiveTextRecognition:
-    return AutoregressiveTextRecognition(
+def model() -> TextRecognition:
+    return TextRecognition(
         in_channels=[3] + [NUM_CHANNELS for _ in range(LEVEL)],
         num_tokens=len(ALPHABET),
         max_sequence_length=MAX_SEQUENCE_LENGTH,
@@ -43,14 +43,14 @@ def targets() -> List[List[str]]:
 
 
 def test_forward(
-    model: AutoregressiveTextRecognition, backbone_output: List[Tensor]
+    model: TextRecognition, backbone_output: List[Tensor]
 ) -> None:
     tokens = model(backbone_output)
     assert tuple(tokens.shape) == (BATCH_SIZE, model.max_sequence_length)
 
 
 def test_training_step(
-    model: AutoregressiveTextRecognition,
+    model: TextRecognition,
     backbone_output: List[Tensor],
     targets: List[List[str]],
 ) -> None:
@@ -59,7 +59,7 @@ def test_training_step(
 
 
 def test_validation_step(
-    model: AutoregressiveTextRecognition,
+    model: TextRecognition,
     backbone_output: List[Tensor],
     targets: List[List[str]],
 ) -> None:
@@ -72,7 +72,7 @@ def test_validation_step(
 
 @pytest.fixture()
 def onnx_model(
-    model: AutoregressiveTextRecognition, backbone_output: List[Tensor]
+    model: TextRecognition, backbone_output: List[Tensor]
 ) -> None:
     torch.onnx.export(
         model,
@@ -109,7 +109,7 @@ def onnx_model(
 
 
 def test_onnx_inference(
-    onnx_model, model: AutoregressiveTextRecognition, backbone_output: List[Tensor]
+    onnx_model, model: TextRecognition, backbone_output: List[Tensor]
 ) -> None:
     model.eval()
     onnx_session = onnxruntime.InferenceSession(onnx_model.SerializeToString())

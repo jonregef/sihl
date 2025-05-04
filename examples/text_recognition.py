@@ -13,10 +13,10 @@ import lightning.pytorch as pl
 import torch
 import torchvision
 
-from sihl import SihlModel, SihlLightningModule, TorchvisionBackbone
-from sihl.heads import SceneTextRecognition
+from sihl import SihlModel, SihlLightningModule
+from sihl.heads import TextRecognition
+from sihl.torchvision_backbone import TorchvisionBackbone
 from sihl.utils import random_pad
-import sihl
 
 
 def collate_fn(batch: List[Tuple[Tensor, Dict]]):
@@ -228,11 +228,10 @@ HYPERPARAMS = {
         "num_channels": 256,
         "max_sequence_length": CyrillicDataset.max_length,
         "num_tokens": len(CyrillicDataset.tokens),
-        "bottom_level": 1,
-        "top_level": 5,
+        "level": 5,
     },
     "optimizer": "AdamW",
-    "optimizer_kwargs": {"lr": 1e-3, "weight_decay": 1e-2},
+    "optimizer_kwargs": {"lr": 1e-4, "weight_decay": 1e-2},
     "scheduler": "OneCycleLR",
     "scheduler_kwargs": {
         "max_lr": 1e-3,
@@ -240,13 +239,14 @@ HYPERPARAMS = {
         "steps_per_epoch": STEPS_PER_EPOCH,
     },
 }
+
 if __name__ == "__main__":
     logging.basicConfig(
         level="INFO", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()]
     )
     log = logging.getLogger("rich")
     logger = pl.loggers.TensorBoardLogger(
-        save_dir=Path(__file__).parent / "logs", name="scene_text_recognition"
+        save_dir=Path(__file__).parent / "logs", name="text_recognition"
     )
     lightning.seed_everything(0)
 
@@ -260,10 +260,7 @@ if __name__ == "__main__":
     )
     with trainer.init_module():
         backbone = TorchvisionBackbone(**HYPERPARAMS["backbone"])
-        # neck = getattr(sihl.layers, HYPERPARAMS["neck"])(
-        #     backbone.out_channels, **HYPERPARAMS["neck_kwargs"]
-        # )
-        head = SceneTextRecognition(
+        head = TextRecognition(
             in_channels=backbone.out_channels, **HYPERPARAMS["head_kwargs"]
         )
         model = SihlLightningModule(
