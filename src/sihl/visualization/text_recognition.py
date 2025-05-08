@@ -64,6 +64,7 @@ def set_text(ax, text):
         va="center",
         fontsize="large",
         wrap=True,
+        parse_math=False,
     )
 
 
@@ -78,4 +79,5 @@ def set_text_on_peak(ax, image, text, fontsize=8):
         ha="center",
         va="center",
         bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.5},
+        parse_math=False,
     )
