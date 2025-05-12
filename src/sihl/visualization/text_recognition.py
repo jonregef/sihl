@@ -4,14 +4,14 @@ from matplotlib import pyplot as plt
 import numpy as np
 import torch
 
-from sihl.heads import AutoregressiveTextRecognition
+from sihl.heads import TextRecognition
 
 from .common import get_images, plot_to_numpy
 
 
-@get_images.register(AutoregressiveTextRecognition)
+@get_images.register(TextRecognition)
 def _(head, config, input, target, features) -> List[np.ndarray]:
-    prediction = head(features)
+    scores, prediction = head.forward(features)
     if "tokens" in config:
         tokens = config["tokens"]
     else:
@@ -64,6 +64,7 @@ def set_text(ax, text):
         va="center",
         fontsize="large",
         wrap=True,
+        parse_math=False,
     )
 
 
@@ -78,4 +79,5 @@ def set_text_on_peak(ax, image, text, fontsize=8):
         ha="center",
         va="center",
         bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.5},
+        parse_math=False,
     )

@@ -3,15 +3,15 @@ from functools import partial
 
 from einops.layers.torch import Rearrange
 from torch import nn, Tensor
+from torch.nn import functional
 from torchmetrics import MeanAbsoluteError, MeanSquaredError, MeanMetric
 
 from sihl.layers import (
     ConvNormAct,
     SimpleUpscaler,
     SequentialConvBlocks,
-    BilinearScaler,
+    Interpolate,
 )
-from sihl.utils import interpolate
 
 sequential_upscalers = partial(SequentialConvBlocks, ConvBlock=SimpleUpscaler)
 
@@ -50,7 +50,7 @@ class Autoencoding(nn.Module):
         self.size = prebottleneck_size
         self.encoder = nn.Sequential(
             ConvNormAct(in_channels[level], num_channels, 1),
-            BilinearScaler(size=self.size),
+            Interpolate(size=self.size),
             Rearrange("b c h w -> b (c h w)", h=self.size[0], w=self.size[1]),
             nn.Linear(
                 num_channels * self.size[0] * self.size[1], representation_channels
@@ -78,7 +78,8 @@ class Autoencoding(nn.Module):
     def forward(self, inputs: List[Tensor]) -> Tensor:
         size = inputs[self.level].shape[2:]
         representations = self.encoder(inputs[self.level])
-        reconstructions = interpolate(self.predecoder(representations), size=size)
+        reconstructions = self.predecoder(representations)
+        reconstructions = functional.interpolate(reconstructions, size=size)
         reconstructions = self.decoder(reconstructions).contiguous()
         return reconstructions, representations
 

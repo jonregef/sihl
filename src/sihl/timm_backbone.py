@@ -3,11 +3,11 @@ from typing import List, Type
 from math import log
 
 from torch import Tensor, nn
+from torch.nn import functional
 import timm
 import torch
 
 from sihl.layers import AntialiasedDownscaler, Normalize
-from sihl.utils import interpolate
 from sihl.torchvision_backbone import freeze_levels
 
 TIMM_BACKBONE_NAMES = (
@@ -147,7 +147,7 @@ class TimmBackbone(nn.Module):
 
             def new_forward(self, x):
                 size = (x.shape[2] // 2, x.shape[3] // 2)
-                return [interpolate(x, size=size)] + old_forward(x)
+                return [functional.interpolate(x, size=size)] + old_forward(x)
 
             self.model.forward = new_forward.__get__(self.model)
 
@@ -177,7 +177,9 @@ class TimmBackbone(nn.Module):
         x = self.normalize(input)
         outputs = self.model.forward(x)
         outputs = [input] + [
-            interpolate(output, size=(x.shape[2] // 2**level, x.shape[3] // 2**level))
+            functional.interpolate(
+                output, size=(x.shape[2] // 2**level, x.shape[3] // 2**level)
+            )
             for output, level in zip(outputs, range(1, self.top_level + 1))
         ]
         for downscaler in self.downscalers:

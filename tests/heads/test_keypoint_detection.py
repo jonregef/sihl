@@ -1,7 +1,9 @@
 from typing import List, Dict
 from pathlib import Path
 
+from onnxslim import slim
 from torch import Tensor
+from torch.export import Dim
 import numpy as np
 import onnx
 import onnxruntime
@@ -37,13 +39,14 @@ def backbone_output() -> List[Tensor]:
 
 @pytest.fixture()
 def targets() -> Dict[str, List[Tensor]]:
+    num_objects = range(BATCH_SIZE)  # tests target with 0 objects too
     return {
         "presence": [
-            torch.randint(0, 2, (MAX_INSTANCES, NUM_KEYPOINTS), dtype=bool)
+            torch.randint(0, 2, (num_objects[_], NUM_KEYPOINTS), dtype=bool)
             for _ in range(BATCH_SIZE)
         ],
         "keypoints": [
-            torch.rand((MAX_INSTANCES, NUM_KEYPOINTS, 2)) for _ in range(BATCH_SIZE)
+            torch.rand((num_objects[_], NUM_KEYPOINTS, 2)) for _ in range(BATCH_SIZE)
         ],
     }
 
@@ -84,36 +87,27 @@ def test_validation_step(
 
 @pytest.fixture()
 def onnx_model(model: KeypointDetection, backbone_output: List[Tensor]) -> None:
+    batch_size, height, width = Dim("batch_size"), Dim("height"), Dim("width")
     torch.onnx.export(
-        model,
-        args=backbone_output,
+        model.eval().to(torch.float32),
+        args=(backbone_output,),
         f=ONNX_FILE_NAME,
         opset_version=ONNX_VERSION,
-        input_names=[f"input_level_{idx}" for idx in range(len(backbone_output))],
-        output_names=[f"head0/{name}" for name, shape in model.output_shapes.items()],
-        dynamic_axes=dict(
-            {
-                f"input_level_{lvl}": {
-                    0: "batch_size",
-                    2: f"height/{2**lvl}",
-                    3: f"width/{2**lvl}",
-                }
-                for lvl in range(len(backbone_output))
-            },
-            **{
-                f"head0/{name}": {
-                    shape_idx: str(shape_value)
-                    for shape_idx, shape_value in enumerate(shape)
-                }
-                for name, shape in model.output_shapes.items()
-            },
+        output_names=model.output_shapes.keys(),
+        dynamic_shapes=(
+            [  # FIXME: dynamic height and width don't work
+                (batch_size, Dim.STATIC, Dim.STATIC, Dim.STATIC)
+                for level in range(len(backbone_output))
+            ],
         ),
+        dynamo=True,
         external_data=False,
         verify=True,
-        # dynamo=True,
         # report=True,
     )
     onnx_model = onnx.load(ONNX_FILE_NAME)
+    onnx_model = slim(onnx_model)
+    onnx.save(onnx_model, ONNX_FILE_NAME)
     Path(ONNX_FILE_NAME).unlink()
     return onnx_model
 
@@ -123,13 +117,14 @@ def test_onnx_inference(
 ) -> None:
     model.eval()
     onnx_session = onnxruntime.InferenceSession(onnx_model.SerializeToString())
+    in_names = [_.name for _ in onnx_model.graph.input]
     onnx_input = {
-        f"input_level_{idx}": _.numpy()
-        for idx, _ in enumerate(backbone_output)
-        if f"input_level_{idx}" in [node.name for node in onnx_model.graph.input]
+        f"inputs_{idx}": x.numpy()
+        for idx, x in enumerate(backbone_output)
+        if f"inputs_{idx}" in in_names
     }
     # just check that 99% of values are equal.
-    pytorch_output = [_.detach().numpy() for _ in model(backbone_output)]
+    pytorch_output = [_.detach().numpy() for _ in model.forward(backbone_output)]
     onnx_output = onnx_session.run(None, onnx_input)
     for i in range(len(pytorch_output)):
         assert (

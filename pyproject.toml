@@ -1,15 +1,16 @@
 [project]
 name = "sihl"
-version = "0.0.3.post5"
+version = "0.0.3.post12"
 description = "Simple Image Heads and Layers"
 authors = [{ name = "Jon", email = "jon@sihl.ai" }]
 dependencies = [
     "einops>=0.8.0",
     "faster-coco-eval>=1.6.5",
-    "torch>=2.5.1",
+    "torch>=2.6.0",
     "torchmetrics>=1.6.0",
-    "torchvision>=0.20.1",
+    "torchvision>=0.21.0",
     "matplotlib>=3.10.0",
+    "tensorboard>=2.18.0",
 ]
 readme = "README.md"
 license = "Apache-2.0"
@@ -33,14 +34,14 @@ Homepage = "https://github.com/jonregef/sihl"
 Repository = "https://github.com/jonregef/sihl"
 
 [project.optional-dependencies]
-timm = ["timm>=1.0.12"]
+timm = ["timm>=1.0.15"]
 lightning = ["lightning>=2.4.0"]
 onnx = ["onnx>=1.17.0", "onnxruntime>=1.19.2"]
 all = [
     "lightning>=2.4.0",
     "onnx>=1.17.0",
     "onnxruntime>=1.19.2",
-    "timm>=1.0.12",
+    "timm>=1.0.15",
 ]
 
 [build-system]
@@ -65,13 +66,14 @@ dev-dependencies = [
     "pyinstrument>=5.0.0",
     "pytest>=8.3.4",
     "rich>=13.9.4",
-    "tensorboard>=2.18.0",
-    "timm>=1.0.12",
+    "timm>=1.0.15",
     "torch>=2.5.1",
     "torchinfo>=1.8.0",
     "torchmetrics>=1.6.0",
     "torchvision>=0.20.1",
     "types-pyyaml>=6.0.12.20240917",
+    "netron>=8.2.6",
+    "onnxslim>=0.1.50",
 ]
 
 [tool.hatch.build.targets.sdist]

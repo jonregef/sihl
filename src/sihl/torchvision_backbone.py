@@ -1,12 +1,13 @@
 from typing import Final, List, Dict, Type
 
 from torch import Tensor, nn
+from torch.nn import functional
 from torchvision.models.feature_extraction import create_feature_extractor
 import torch
 import torchvision
 
 from sihl.layers import AntialiasedDownscaler, Normalize
-from sihl.utils import recursive_setattr, recursive_getattr, interpolate
+from sihl.utils import recursive_setattr, recursive_getattr
 
 
 TORCHVISION_MODEL_LEVELS: Final[Dict[str, List[str]]] = {
@@ -178,7 +179,9 @@ class TorchvisionBackbone(nn.Module):
         x = self.normalize(input)
         outputs = list(self.model(x).values())
         outputs = [input] + [
-            interpolate(output, size=(x.shape[2] // 2**level, x.shape[3] // 2**level))
+            functional.interpolate(
+                output, size=(x.shape[2] // 2**level, x.shape[3] // 2**level)
+            )
             for output, level in zip(outputs, range(1, self.top_level + 1))
         ]
         for downscaler in self.downscalers:

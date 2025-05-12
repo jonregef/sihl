@@ -9,7 +9,7 @@ from sihl.heads import ViewInvarianceLearning
 from .common import get_images
 from . import anomaly_detection
 from . import autoencoding
-from . import autoregressive_text_recognition
+from . import text_recognition
 from . import depth_estimation
 from . import instance_segmentation
 from . import keypoint_detection
@@ -20,7 +20,6 @@ from . import object_detection
 from . import panoptic_segmentation
 from . import quadrilateral_detection
 from . import regression
-from . import scene_text_recognition
 from . import semantic_segmentation
 from . import view_invariance_learning
 
@@ -33,6 +32,7 @@ def visualize(
     logger: Any,
     step: int,
     start_idx: int = 0,
+    prefix: str = "",
 ):
     features = model.eval().extract_features(input)
     for idx, (config, head, target) in enumerate(zip(configs, model.heads, targets)):
@@ -41,5 +41,7 @@ def visualize(
         vizs = get_images(head, config, input, target, features)  # singly dispatched
         for viz_idx, viz_img in enumerate(vizs):
             logger.experiment.add_image(
-                f"{idx}/visualizations/{start_idx + viz_idx}", viz_img, global_step=step
+                f"{prefix}{idx}/visualizations/{start_idx + viz_idx}",
+                viz_img,
+                global_step=step,
             )

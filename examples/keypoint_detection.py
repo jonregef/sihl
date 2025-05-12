@@ -18,7 +18,9 @@ import torchvision.transforms.v2 as transforms
 
 from sihl import SihlModel, SihlLightningModule, TorchvisionBackbone
 from sihl.heads import KeypointDetection
-from sihl.layers import FPN
+import sihl.layers
+
+lightning.seed_everything(0, workers=True)
 
 
 ### HACK: torchvision doesn't support augmenting keypoints yet
@@ -44,7 +46,7 @@ def bboxes_to_polygons(bboxes: tv_tensors.BoundingBoxes, num_vertices: int) -> T
 ###
 
 
-class CocoHumanPoseEstimationDataset(torch.utils.data.Dataset):
+class CocoHumanKeypointDetectionDataset(torch.utils.data.Dataset):
     KEYPOINT_LABELS = [
         "nose",
         "left_eye",
@@ -65,29 +67,31 @@ class CocoHumanPoseEstimationDataset(torch.utils.data.Dataset):
         "right_ankle",
     ]
     SKELETON = [
-        ["left_ankle", "left_knee"],
-        ["left_knee", "left_hip"],
-        ["right_ankle", "right_knee"],
-        ["right_knee", "right_hip"],
-        ["left_hip", "right_hip"],
-        ["left_shoulder", "left_hip"],
-        ["right_shoulder", "right_hip"],
-        ["left_shoulder", "right_shoulder"],
-        ["left_shoulder", "left_elbow"],
-        ["right_shoulder", "right_elbow"],
-        ["left_elbow", "left_wrist"],
-        ["right_elbow", "right_wrist"],
-        ["left_eye", "right_eye"],
-        ["nose", "left_eye"],
-        ["nose", "right_eye"],
-        ["left_eye", "left_ear"],
-        ["right_eye", "right_ear"],
-        ["left_ear", "left_shoulder"],
-        ["right_ear", "right_shoulder"],
+        ("left_ankle", "left_knee"),
+        ("left_knee", "left_hip"),
+        ("right_ankle", "right_knee"),
+        ("right_knee", "right_hip"),
+        ("left_hip", "right_hip"),
+        ("left_shoulder", "left_hip"),
+        ("right_shoulder", "right_hip"),
+        ("left_shoulder", "right_shoulder"),
+        ("left_shoulder", "left_elbow"),
+        ("right_shoulder", "right_elbow"),
+        ("left_elbow", "left_wrist"),
+        ("right_elbow", "right_wrist"),
+        ("left_eye", "right_eye"),
+        ("nose", "left_eye"),
+        ("nose", "right_eye"),
+        ("left_eye", "left_ear"),
+        ("right_eye", "right_ear"),
+        ("left_ear", "left_shoulder"),
+        ("right_ear", "right_shoulder"),
     ]
 
-    def __init__(self, data_dir: Path, train: bool = False) -> None:
-        self.image_size = 800
+    def __init__(
+        self, data_dir: Path, train: bool = False, image_size: int = 640
+    ) -> None:
+        self.image_size = image_size
         self.train = train
         self.data_dir = data_dir
         self.annots_by_image = {}
@@ -114,13 +118,28 @@ class CocoHumanPoseEstimationDataset(torch.utils.data.Dataset):
                 self.annots_by_image[image_path] = []
             self.annots_by_image[image_path].append(annot["keypoints"])
         self.annots_by_image = list(self.annots_by_image.items())
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize(self.image_size - 1, max_size=self.image_size),
-                transforms.RandomCrop(self.image_size, pad_if_needed=True),
-                transforms.ToDtype(torch.float32, scale=True),
-            ]
-        )
+        if train:
+            self.transforms = transforms.Compose(
+                [
+                    # transforms.ToImage(),
+                    # transforms.RandomPhotometricDistort(),
+                    # transforms.RandomZoomOut(side_range=(1.0, 2.0)),
+                    # transforms.RandomIoUCrop(),
+                    # transforms.RandomHorizontalFlip(),
+                    transforms.Resize(image_size - 1, max_size=image_size),
+                    transforms.RandomCrop(image_size, pad_if_needed=True),
+                    transforms.ToDtype(torch.float32, scale=True),
+                ]
+            )
+        else:
+            self.transforms = transforms.Compose(
+                [
+                    # transforms.ToImage(),
+                    transforms.Resize(image_size - 1, max_size=image_size),
+                    transforms.RandomCrop(image_size, pad_if_needed=True),
+                    transforms.ToDtype(torch.float32, scale=True),
+                ]
+            )
 
     def __getitem__(self, idx: int) -> Tuple[Tensor, Tensor]:
         image_path, annot = self.annots_by_image[idx]
@@ -129,14 +148,14 @@ class CocoHumanPoseEstimationDataset(torch.utils.data.Dataset):
         keypoints = target[:, :, :2].to(torch.float32)
         presence = target[:, :, 2].to(torch.bool)
         keypoints = polygons_to_bboxes(keypoints, image.shape[1:])
-        image, keypoints = self.transform(image, keypoints)
+        image, keypoints = self.transforms(image, keypoints)
         keypoints, inside = bboxes_to_polygons(keypoints, len(self.KEYPOINT_LABELS))
         presence = presence & inside
         keypoints = keypoints * presence.unsqueeze(2)
         # remove instances that have no present keypoint
-        visible_instances = presence.any(dim=1)
-        presence = presence[visible_instances]
-        keypoints = keypoints[visible_instances]
+        # visible_instances = presence.any(dim=1)
+        # presence = presence[visible_instances]
+        # keypoints = keypoints[visible_instances]
         return image, {"keypoints": keypoints, "presence": presence}
 
     def __len__(self) -> int:
@@ -151,7 +170,7 @@ class CocoHumanPoseEstimationDataset(torch.utils.data.Dataset):
 
 
 class CocoDataModule(pl.LightningDataModule):
-    def __init__(self, batch_size: int = 32) -> None:
+    def __init__(self, batch_size: int) -> None:
         super().__init__()
         self.batch_size = batch_size
         self.data_dir = Path(__file__).parent / "data" / "coco_2017"
@@ -168,8 +187,8 @@ class CocoDataModule(pl.LightningDataModule):
             )
 
     def setup(self, stage: str = "") -> None:
-        self.trainset = CocoHumanPoseEstimationDataset(self.data_dir, train=True)
-        self.validset = CocoHumanPoseEstimationDataset(self.data_dir, train=False)
+        self.trainset = CocoHumanKeypointDetectionDataset(self.data_dir, train=True)
+        self.validset = CocoHumanKeypointDetectionDataset(self.data_dir, train=False)
 
     def train_dataloader(self) -> DataLoader[Tuple[Tensor, Tensor]]:
         return DataLoader(
@@ -177,8 +196,7 @@ class CocoDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=4,
-            drop_last=True,
-            collate_fn=CocoHumanPoseEstimationDataset.collate_fn,
+            collate_fn=CocoHumanKeypointDetectionDataset.collate_fn,
         )
 
     def val_dataloader(self) -> DataLoader[Tuple[Tensor, Tensor]]:
@@ -187,10 +205,26 @@ class CocoDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=4,
-            drop_last=True,
-            collate_fn=CocoHumanPoseEstimationDataset.collate_fn,
+            collate_fn=CocoHumanKeypointDetectionDataset.collate_fn,
         )
 
+
+STEPS_PER_EPOCH = 4008
+MAX_STEPS = 12 * STEPS_PER_EPOCH
+HYPERPARAMS = {
+    "max_steps": MAX_STEPS,
+    "image_size": 640,
+    "batch_size": 16,
+    "gradient_clip_val": 0.1,
+    "backbone": {"name": "resnet50", "pretrained": True, "frozen_levels": 1},
+    "neck": "HybridEncoder",
+    "neck_kwargs": {"out_channels": 256, "bottom_level": 3, "top_level": 7},
+    "head_kwargs": {"num_channels": 256, "bottom_level": 3, "top_level": 7},
+    "optimizer": "AdamW",
+    "optimizer_kwargs": {"lr": 1e-4, "weight_decay": 1e-4, "backbone_lr_factor": 0.1},
+    "scheduler": "MultiStepLR",
+    "scheduler_kwargs": {"milestones": [8 * STEPS_PER_EPOCH], "gamma": 0.1},
+}
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -199,41 +233,39 @@ if __name__ == "__main__":
     log = logging.getLogger("rich")
     logger = pl.loggers.TensorBoardLogger(
         save_dir=Path(__file__).parent / "logs",
+        default_hp_metric=False,
         name="keypoint_detection",
-        # version="tmp",
     )
-    lightning.seed_everything(0)
 
     trainer = pl.Trainer(
-        max_steps=90_000,
+        max_steps=HYPERPARAMS["max_steps"],
         accelerator="gpu",
         logger=logger,
         callbacks=[pl.callbacks.RichProgressBar(leave=True)],
-        gradient_clip_val=1,
+        gradient_clip_val=HYPERPARAMS["gradient_clip_val"],
         precision="16-mixed",
-        val_check_interval=1000,
+        val_check_interval=0.25,
     )
     with trainer.init_module():
-        backbone = TorchvisionBackbone("resnet50", pretrained=True, frozen_levels=1)
-        neck = FPN(backbone.out_channels, 256, bottom_level=3, top_level=7)
+        backbone = TorchvisionBackbone(**HYPERPARAMS["backbone"])
+        neck = getattr(sihl.layers, HYPERPARAMS["neck"])(
+            backbone.out_channels, **HYPERPARAMS["neck_kwargs"]
+        )
         head = KeypointDetection(
             in_channels=neck.out_channels,
-            num_keypoints=len(CocoHumanPoseEstimationDataset.KEYPOINT_LABELS),
-            soft_label_decay_steps=90_000,
+            num_keypoints=len(CocoHumanKeypointDetectionDataset.KEYPOINT_LABELS),
+            **HYPERPARAMS["head_kwargs"],
         )
         model = SihlLightningModule(
             SihlModel(backbone=backbone, neck=neck, heads=[head]),
-            optimizer=torch.optim.SGD,
-            optimizer_kwargs={"lr": 1e-2, "weight_decay": 1e-4, "momentum": 0.9},
-            scheduler=torch.optim.lr_scheduler.MultiStepLR,
-            scheduler_kwargs={
-                "milestones": [60_000, 80_000],
-                "gamma": 0.1,
-                "warmup_batches": 1000,
-            },
+            optimizer=getattr(torch.optim, HYPERPARAMS["optimizer"]),
+            optimizer_kwargs=HYPERPARAMS["optimizer_kwargs"],
+            scheduler=getattr(torch.optim.lr_scheduler, HYPERPARAMS["scheduler"]),
+            scheduler_kwargs=HYPERPARAMS["scheduler_kwargs"],
+            hyperparameters=HYPERPARAMS,
             data_config={
-                "keypoints": CocoHumanPoseEstimationDataset.KEYPOINT_LABELS,
-                "links": CocoHumanPoseEstimationDataset.SKELETON,
+                "keypoints": CocoHumanKeypointDetectionDataset.KEYPOINT_LABELS,
+                "links": CocoHumanKeypointDetectionDataset.SKELETON,
             },
         )
 
@@ -246,4 +278,4 @@ if __name__ == "__main__":
             depth=5,
         )
     )
-    trainer.fit(model, datamodule=CocoDataModule(batch_size=16))
+    trainer.fit(model, datamodule=CocoDataModule(batch_size=HYPERPARAMS["batch_size"]))
