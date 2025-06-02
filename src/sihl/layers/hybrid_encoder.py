@@ -8,7 +8,7 @@ from torchvision import ops
 import torch
 import torch.nn as nn
 
-from sihl.utils import sine_embedding, coordinate_grid
+from sihl.utils import sine_embedding_2d_grid
 
 
 class HybridEncoder(nn.Module):
@@ -22,6 +22,7 @@ class HybridEncoder(nn.Module):
         top_level: int,
     ):
         super().__init__()
+        assert out_channels % 2 == 0
         self.in_channels = in_channels
         self.top_in_level = min(top_level, len(in_channels) - 1)
 
@@ -31,23 +32,26 @@ class HybridEncoder(nn.Module):
         self.out_channels = in_channels.copy()
         self.out_channels[levels.start : levels.stop] = [out_channels for _ in levels]
 
-        Conv = partial(ops.Conv2dNormActivation, activation_layer=nn.SiLU)
         self.input_projections = nn.ModuleList(
-            Conv(in_channels[level], out_channels, 1)
+            ops.Conv2dNormActivation(
+                in_channels[level], out_channels, 1, activation_layer=None
+            )
             for level in range(bottom_level, self.top_in_level + 1)
         )
         self.encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 out_channels,
-                nhead=4,
-                dim_feedforward=1024,
+                nhead=8,
+                dim_feedforward=4 * out_channels,
                 dropout=0,
                 activation="gelu",
                 batch_first=True,
+                norm_first=True,
             ),
             num_layers=1,
         )
 
+        Conv = partial(ops.Conv2dNormActivation, activation_layer=nn.SiLU)
         # top-down (fpn)
         self.up_convs = nn.ModuleList()
         self.up_fusions = nn.ModuleList()
@@ -72,11 +76,12 @@ class HybridEncoder(nn.Module):
         xs = [project(x) for project, x in zip(self.input_projections, xs)]
 
         batch_size, _, height, width = xs[-1].shape
-        x = rearrange(xs[-1], "b c h w -> b (h w) c")
-        grid = rearrange(coordinate_grid(height, width).to(x), "h w c -> (h w) c")
-        pos_emb = sine_embedding(grid, self.num_channels).detach()
-        x = self.encoder(x + pos_emb)
-        x = rearrange(x, "b (h w) c -> b c h w", h=height, w=width)
+        pos_emb = sine_embedding_2d_grid(
+            height, width, self.num_channels, device=xs[-1].device
+        )
+        pos_emb = rearrange(pos_emb, "h w c -> 1 c h w")
+        x = rearrange(xs[-1] + pos_emb, "b c h w -> b (h w) c")
+        x = rearrange(x + self.encoder(x), "b (h w) c -> b c h w", h=height, w=width)
         xs = xs[:-1] + [x]
 
         inner_outs = [x]
@@ -102,15 +107,16 @@ class HybridEncoder(nn.Module):
         return inputs[: self.bottom_level] + outs + inputs[self.top_level + 1 :]
 
 
-class RepVggBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
+class RepVGGBlock(nn.Module):
+    def __init__(self, num_channels: int):
         super().__init__()
         Conv = partial(ops.Conv2dNormActivation, activation_layer=None)
-        self.conv1 = Conv(in_channels, out_channels, 3)
-        self.conv2 = Conv(in_channels, out_channels, 1)
+        self.conv1 = Conv(num_channels, num_channels, 3)
+        self.conv2 = Conv(num_channels, num_channels, 1)
+        self.identity = nn.BatchNorm2d(num_channels)
 
     def forward(self, x: Tensor) -> Tensor:
-        return functional.silu(self.conv1(x) + self.conv2(x))
+        return functional.silu(self.conv1(x) + self.conv2(x) + self.identity(x))
 
 
 class CSPRepLayer(nn.Module):
@@ -120,7 +126,7 @@ class CSPRepLayer(nn.Module):
         self.conv1 = Conv(in_channels, out_channels, 1)
         self.conv2 = Conv(in_channels, out_channels, 1)
         self.bottlenecks = nn.Sequential(
-            *[RepVggBlock(out_channels, out_channels) for _ in range(num_layers)]
+            *[RepVGGBlock(out_channels) for _ in range(num_layers)]
         )
 
     def forward(self, x1: Tensor, x2: Tensor) -> Tensor:

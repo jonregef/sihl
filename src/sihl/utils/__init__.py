@@ -14,26 +14,11 @@ import torchvision
 
 from sihl.utils.polygon_iou import polygon_iou
 from sihl.utils.oks import ObjectKeypointSimilarity
+from sihl.utils.pck import PercentageOfCorrectKeypoints
+from sihl.utils.f1 import OptimalF1Threshold
 
 
 EPS = 1e-5
-
-
-def inverse_sigmoid(x: Tensor) -> Tensor:
-    return torch.log(x / (1 - x))
-
-
-def positive_squash(x: Tensor) -> Tensor:
-    return x / (1 + x)
-
-
-def inverse_positive_squash(x: Tensor) -> Tensor:
-    return x / (1 - x)
-
-
-def logcosh(x: Tensor) -> Tensor:
-    """https://datascience.stackexchange.com/a/102234"""
-    return x + functional.softplus(-2.0 * x) - math.log(2.0)
 
 
 class BatchedMeanVarianceAccumulator:
@@ -74,20 +59,6 @@ class BatchedMeanVarianceAccumulator:
         return self.mean, variance
 
 
-def init(m: nn.Module, kaiming: bool = True) -> None:
-    if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-        if kaiming:
-            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-        else:
-            nn.init.xavier_normal_(m.weight)
-        if m.bias is not None:
-            nn.init.constant_(m.bias, 0)
-
-    elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-        nn.init.constant_(m.weight, 1)
-        nn.init.constant_(m.bias, 0)
-
-
 def random_pad(
     image: Tensor, target_size: Union[int, Tuple[int, int]], fill: Union[float, int] = 0
 ) -> Tensor:
@@ -126,20 +97,46 @@ def coordinate_grid(height: int, width: int) -> Tensor:
     return torch.stack([xs, ys], dim=2)
 
 
-def sine_embedding(
-    input_tensor: Tensor, num_channels: int, temperature: float = 10000.0
-) -> Tensor:
-    in_channels, device = input_tensor.shape[-1], input_tensor.device
-    num_frequencies = num_channels // (in_channels * 2)
-    remainder = num_channels % (in_channels * 2)
-    omega = torch.arange(num_frequencies, dtype=torch.float32, device=device)
-    frequencies = (1.0 / (temperature ** (omega / num_frequencies))).unsqueeze(0)
-    values = input_tensor.unsqueeze(-1) @ frequencies
-    embeddings = torch.cat([values.sin(), values.cos()], dim=-1).flatten(-2, -1)
-    if remainder > 0:
-        padding = torch.zeros(*embeddings.shape[:-1], remainder, device=device)
-        embeddings = torch.cat([embeddings, padding], dim=-1)
-    return embeddings
+def sine_embedding_1d(positions: int, dim: int, temperature=10000, device=None):
+    if dim % 2 != 0:
+        raise ValueError(f"Embedding dimension must be even, got {dim}")
+
+    if positions.dim() == 0:
+        positions = positions.unsqueeze(0)
+
+    if device is None:
+        device = positions.device
+
+    half_dim = dim // 2
+    emb = math.log(temperature) / (half_dim - 1)
+    emb = torch.exp(torch.arange(half_dim, dtype=torch.float32, device=device) * -emb)
+    emb = positions.unsqueeze(-1).to(torch.float) * emb.unsqueeze(0)
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+    return emb
+
+
+def sine_embedding_2d(
+    height_pos: int, width_pos: int, dim: int, temperature=10000, device=None
+):
+    if dim % 4 != 0:
+        raise ValueError(f"Embedding dimension must be divisible by 4, got {dim}")
+    if device is None:
+        device = height_pos.device
+    dim_per_axis = dim // 2
+    height_emb = sine_embedding_1d(height_pos, dim_per_axis, temperature, device)
+    width_emb = sine_embedding_1d(width_pos, dim_per_axis, temperature, device)
+    emb_2d = torch.cat([height_emb, width_emb], dim=-1)
+    return emb_2d
+
+
+def sine_embedding_2d_grid(
+    height: int, width: int, dim: int, temperature=10000, device=None
+):
+    y_pos = torch.arange(height, dtype=torch.float32, device=device)
+    x_pos = torch.arange(width, dtype=torch.float32, device=device)
+    y_grid, x_grid = torch.meshgrid(y_pos, x_pos, indexing="ij")
+    emb_2d = sine_embedding_2d(y_grid, x_grid, dim, temperature, device)
+    return emb_2d
 
 
 def f_score(beta: float) -> Callable[[Tensor, Tensor], Tensor]:

@@ -173,10 +173,8 @@ class CocoObjectDetectionDataset(torch.utils.data.Dataset):
         if train:
             self.transforms = transforms.Compose(
                 [
-                    # transforms.RandomPhotometricDistort(),
-                    # transforms.RandomZoomOut(side_range=(1.0, 2.0)),
-                    # transforms.RandomIoUCrop(),
                     transforms.RandomHorizontalFlip(),
+                    transforms.RandomZoomOut(side_range=(1.0, 2.0)),
                     transforms.Resize(image_size - 1, max_size=image_size),
                     transforms.RandomCrop(image_size, pad_if_needed=True),
                     transforms.ToDtype(torch.float32, scale=True),
@@ -261,26 +259,19 @@ class CocoDataModule(pl.LightningDataModule):
         )
 
 
-STEPS_PER_EPOCH = 7330
-EPOCHS = 12
 HYPERPARAMS = {
-    "max_steps": EPOCHS * STEPS_PER_EPOCH,
+    "max_steps": 90_000,
     "image_size": 640,
     "batch_size": 16,
     "gradient_clip_val": 0.1,
     "backbone": {"name": "resnet50", "pretrained": True, "frozen_levels": 1},
     "neck": "HybridEncoder",
     "neck_kwargs": {"out_channels": 256, "bottom_level": 3, "top_level": 7},
-    "head_kwargs": {
-        "num_classes": len(VALID_COCO_LABELS),
-        "num_channels": 256,
-        "bottom_level": 3,
-        "top_level": 7,
-    },
+    "head_kwargs": {"num_channels": 256, "bottom_level": 3, "top_level": 7},
     "optimizer": "AdamW",
     "optimizer_kwargs": {"lr": 1e-4, "weight_decay": 1e-4, "backbone_lr_factor": 0.1},
     "scheduler": "MultiStepLR",
-    "scheduler_kwargs": {"milestones": [8 * STEPS_PER_EPOCH], "gamma": 0.1},
+    "scheduler_kwargs": {"milestones": [60_000, 80_000], "gamma": 0.1},
 }
 if __name__ == "__main__":
     logging.basicConfig(
@@ -308,7 +299,9 @@ if __name__ == "__main__":
             backbone.out_channels, **HYPERPARAMS["neck_kwargs"]
         )
         head = ObjectDetection(
-            in_channels=neck.out_channels, **HYPERPARAMS["head_kwargs"]
+            in_channels=neck.out_channels,
+            num_classes=len(VALID_COCO_LABELS),
+            **HYPERPARAMS["head_kwargs"],
         )
         model = SihlLightningModule(
             SihlModel(backbone=backbone, neck=neck, heads=[head]),

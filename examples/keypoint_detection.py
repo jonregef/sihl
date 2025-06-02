@@ -88,9 +88,7 @@ class CocoHumanKeypointDetectionDataset(torch.utils.data.Dataset):
         ("right_ear", "right_shoulder"),
     ]
 
-    def __init__(
-        self, data_dir: Path, train: bool = False, image_size: int = 640
-    ) -> None:
+    def __init__(self, data_dir: Path, image_size: int, train: bool = False) -> None:
         self.image_size = image_size
         self.train = train
         self.data_dir = data_dir
@@ -121,11 +119,7 @@ class CocoHumanKeypointDetectionDataset(torch.utils.data.Dataset):
         if train:
             self.transforms = transforms.Compose(
                 [
-                    # transforms.ToImage(),
-                    # transforms.RandomPhotometricDistort(),
-                    # transforms.RandomZoomOut(side_range=(1.0, 2.0)),
-                    # transforms.RandomIoUCrop(),
-                    # transforms.RandomHorizontalFlip(),
+                    transforms.RandomZoomOut(side_range=(1.0, 2.0)),
                     transforms.Resize(image_size - 1, max_size=image_size),
                     transforms.RandomCrop(image_size, pad_if_needed=True),
                     transforms.ToDtype(torch.float32, scale=True),
@@ -134,7 +128,6 @@ class CocoHumanKeypointDetectionDataset(torch.utils.data.Dataset):
         else:
             self.transforms = transforms.Compose(
                 [
-                    # transforms.ToImage(),
                     transforms.Resize(image_size - 1, max_size=image_size),
                     transforms.RandomCrop(image_size, pad_if_needed=True),
                     transforms.ToDtype(torch.float32, scale=True),
@@ -152,10 +145,6 @@ class CocoHumanKeypointDetectionDataset(torch.utils.data.Dataset):
         keypoints, inside = bboxes_to_polygons(keypoints, len(self.KEYPOINT_LABELS))
         presence = presence & inside
         keypoints = keypoints * presence.unsqueeze(2)
-        # remove instances that have no present keypoint
-        # visible_instances = presence.any(dim=1)
-        # presence = presence[visible_instances]
-        # keypoints = keypoints[visible_instances]
         return image, {"keypoints": keypoints, "presence": presence}
 
     def __len__(self) -> int:
@@ -170,11 +159,12 @@ class CocoHumanKeypointDetectionDataset(torch.utils.data.Dataset):
 
 
 class CocoDataModule(pl.LightningDataModule):
-    def __init__(self, batch_size: int) -> None:
+    def __init__(self, batch_size: int, image_size: int) -> None:
         super().__init__()
         self.batch_size = batch_size
+        self.image_size = image_size
         self.data_dir = Path(__file__).parent / "data" / "coco_2017"
-        self.data_dir.mkdir(exist_ok=True)
+        self.data_dir.parent.mkdir(exist_ok=True)
 
     def prepare_data(self) -> None:
         if not self.data_dir.exists():
@@ -187,8 +177,12 @@ class CocoDataModule(pl.LightningDataModule):
             )
 
     def setup(self, stage: str = "") -> None:
-        self.trainset = CocoHumanKeypointDetectionDataset(self.data_dir, train=True)
-        self.validset = CocoHumanKeypointDetectionDataset(self.data_dir, train=False)
+        self.trainset = CocoHumanKeypointDetectionDataset(
+            self.data_dir, image_size=self.image_size, train=True
+        )
+        self.validset = CocoHumanKeypointDetectionDataset(
+            self.data_dir, image_size=self.image_size, train=False
+        )
 
     def train_dataloader(self) -> DataLoader[Tuple[Tensor, Tensor]]:
         return DataLoader(
@@ -209,21 +203,24 @@ class CocoDataModule(pl.LightningDataModule):
         )
 
 
-STEPS_PER_EPOCH = 4008
-MAX_STEPS = 12 * STEPS_PER_EPOCH
 HYPERPARAMS = {
-    "max_steps": MAX_STEPS,
+    "max_steps": 90_000,
     "image_size": 640,
     "batch_size": 16,
     "gradient_clip_val": 0.1,
     "backbone": {"name": "resnet50", "pretrained": True, "frozen_levels": 1},
     "neck": "HybridEncoder",
     "neck_kwargs": {"out_channels": 256, "bottom_level": 3, "top_level": 7},
-    "head_kwargs": {"num_channels": 256, "bottom_level": 3, "top_level": 7},
+    "head_kwargs": {
+        "num_channels": 256,
+        "mask_level": 3,
+        "bottom_level": 5,
+        "top_level": 7,
+    },
     "optimizer": "AdamW",
     "optimizer_kwargs": {"lr": 1e-4, "weight_decay": 1e-4, "backbone_lr_factor": 0.1},
     "scheduler": "MultiStepLR",
-    "scheduler_kwargs": {"milestones": [8 * STEPS_PER_EPOCH], "gamma": 0.1},
+    "scheduler_kwargs": {"milestones": [60_000, 80_000], "gamma": 0.1},
 }
 
 if __name__ == "__main__":
@@ -278,4 +275,9 @@ if __name__ == "__main__":
             depth=5,
         )
     )
-    trainer.fit(model, datamodule=CocoDataModule(batch_size=HYPERPARAMS["batch_size"]))
+    trainer.fit(
+        model,
+        datamodule=CocoDataModule(
+            batch_size=HYPERPARAMS["batch_size"], image_size=HYPERPARAMS["image_size"]
+        ),
+    )
