@@ -16,7 +16,7 @@ You should get results similar to these:
 | [autoencoding](./autoencoding.py) | 200 | Stanford Cars | mean absolute error | 0.06 |
 | [depth estimation](./depth_estimation.py) | 30 | NYU V2 | mean absolute error | 0.35 |
 | [instance segmentation](./instance_segmentation.py) | 12 | COCO 2017 | mean average precision (mask) | 30% |
-| [keypoint detection](./keypoint_detection.py) | 12 | COCO 2017 | mean average precision (pose) | NA |
+| [keypoint detection](./keypoint_detection.py) | 12 | COCO 2017 | percent of correct keypoint | 71% |
 | [metric learning](./metric_learning.py) | 5 | Stanford Cars | nearest neighbor accuracy | 0.79 |
 | [multiclass classification](./multiclass_classification.py) | 50 | Stanford Cars | accuracy | 88% |
 | [multilabel classification](./multilabel_classification.py) | 12 | COCO 2017 | accuracy | 0.98 |
