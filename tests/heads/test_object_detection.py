@@ -103,7 +103,7 @@ def onnx_model(model: ObjectDetection, backbone_output: List[Tensor]) -> None:
     onnx_model = onnx.load(ONNX_FILE_NAME)
     onnx_model = slim(onnx_model)
     onnx.save(onnx_model, ONNX_FILE_NAME)
-    # Path(ONNX_FILE_NAME).unlink()
+    Path(ONNX_FILE_NAME).unlink()
     return onnx_model
 
 

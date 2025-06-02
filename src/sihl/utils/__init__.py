@@ -13,7 +13,6 @@ import torch
 import torchvision
 
 from sihl.utils.polygon_iou import polygon_iou
-from sihl.utils.oks import ObjectKeypointSimilarity
 from sihl.utils.pck import PercentageOfCorrectKeypoints
 from sihl.utils.f1 import OptimalF1Threshold
 

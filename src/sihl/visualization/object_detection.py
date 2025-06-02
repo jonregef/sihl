@@ -65,7 +65,7 @@ def _(head, config, input, target, features) -> List[np.ndarray]:
         axes[2].title.set_text("Prediction")
         # axes[2].imshow(np.full_like(image, fill_value=255))
         axes[2].imshow(image, alpha=0.5)
-        axes[2].imshow(saliency[batch], cmap="Reds", alpha=0.5)
+        axes[2].imshow(saliency[batch], vmin=0, vmax=1, cmap="Reds", alpha=0.5)
         if prediction is not None:
             n = num_instances[batch]
             for label, box, score in zip(
