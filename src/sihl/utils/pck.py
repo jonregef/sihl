@@ -14,7 +14,7 @@ class PercentageOfCorrectKeypoints(Metric):
     N predictions and M ground truths that need to be optimally matched.
     """
 
-    def __init__(self, threshold: float = 0.1) -> None:
+    def __init__(self, threshold: float = 0.05) -> None:
         """
         Initialize the PCK metric.
 

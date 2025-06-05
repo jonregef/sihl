@@ -12,7 +12,7 @@ from sihl.heads.metric_learning import MetricLearning
 from sihl.heads.multiclass_classification import MulticlassClassification
 from sihl.heads.multilabel_classification import MultilabelClassification
 from sihl.heads.object_detection import ObjectDetection
-from sihl.heads.panoptic_segmentation import PanopticSegmentation
+# from sihl.heads.panoptic_segmentation import PanopticSegmentation
 from sihl.heads.quadrilateral_detection import QuadrilateralDetection
 from sihl.heads.regression import Regression
 from sihl.heads.semantic_segmentation import SemanticSegmentation

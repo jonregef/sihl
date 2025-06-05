@@ -151,27 +151,28 @@ class ObjectDetection(nn.Module):
         feats = [
             lateral(inputs[level]) for level, lateral in zip(self.levels, self.laterals)
         ]
-        feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], dim=1)
+        flat_feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], 1)
 
         # location loss
-        loc_target = (rel_iou == 1.0).to(torch.float)
-        loc_logits = self.loc_head(feats).squeeze(2)
+        loc_logits = self.loc_head(flat_feats).squeeze(2)
         with torch.autocast(device_type="cuda", enabled=False):
+            loc_target = (rel_iou == 1.0).to(torch.float32)
             loc_loss = functional.binary_cross_entropy_with_logits(
-                loc_logits.to(torch.float32), loc_target, reduction="none"
+                loc_logits, loc_target, reduction="none"
             )
             loc_loss = loc_loss.sum() / loc_target.sum()
 
         if rel_iou.max() == 0:
-            zero = torch.zeros_like(loc_loss)
             metrics = {
                 "location_loss": loc_loss,
-                **{"box_loss": zero, "class_loss": zero, "iou_loss": zero},
+                "box_loss": torch.zeros_like(loc_loss),
+                "class_loss": torch.zeros_like(loc_loss),
+                "iou_loss": torch.zeros_like(loc_loss),
             }
             return loc_loss, metrics
 
         # iou loss
-        iou_preds = self.iou_head(feats).squeeze(2)
+        iou_preds = self.iou_head(flat_feats).squeeze(2)
         with torch.autocast(device_type="cuda", enabled=False):
             iou_loss = functional.mse_loss(
                 iou_preds.to(torch.float32), rel_iou, reduction="none"
@@ -180,7 +181,7 @@ class ObjectDetection(nn.Module):
 
         o2m_mask = rel_iou > 0
         o2m_weights = rel_iou[o2m_mask]
-        o2m_feats = feats[o2m_mask]
+        o2m_feats = flat_feats[o2m_mask]
 
         # box loss
         offsets = torch.cat([offsets[mask] for mask in o2m_mask])
@@ -190,9 +191,8 @@ class ObjectDetection(nn.Module):
             [boxes[b][assignment[b, m]] for b, m in enumerate(o2m_mask)]
         )
         with torch.autocast(device_type="cuda", enabled=False):
-            box_target = box_target.to(torch.float32) / full_size
             box_loss = ops.complete_box_iou_loss(
-                box_preds.to(torch.float32), box_target, reduction="none"
+                box_preds, box_target.to(torch.float32) / full_size, reduction="none"
             )
             box_loss = (o2m_weights * box_loss).sum() / o2m_weights.sum()
 

@@ -13,6 +13,11 @@ from sihl.utils import PercentageOfCorrectKeypoints
 
 
 class KeypointDetection(nn.Module):
+    """
+    Refs:
+        1. [FCPose: Fully Convolutional Multi-Person Pose Estimation with Dynamic Instance-Aware Convolutions](https://arxiv.org/abs/2105.14185)
+    """
+
     def __init__(
         self,
         in_channels: List[int],
@@ -28,7 +33,8 @@ class KeypointDetection(nn.Module):
         Args:
             in_channels (List[int]): Number of channels in input feature maps, sorted by level.
             num_keypoints (int): Number of keypoints.
-            bottom_level (int, optional): Bottom level of inputs this head is attached to. Defaults to 3.
+            mask_level (int, optional): Feature level of inputs used to compute keypoint heatmaps. Defaults to 3.
+            bottom_level (int, optional): Bottom level of inputs this head is attached to. Defaults to 5.
             top_level (int, optional): Top level of inputs this head is attached to. Defaults to 5.
             num_channels (int, optional): Number of convolutional channels. Defaults to 256.
             num_layers (int, optional): Number of convolutional layers. Defaults to 4.
@@ -106,6 +112,7 @@ class KeypointDetection(nn.Module):
             lateral(inputs[level]) for level, lateral in zip(self.levels, self.laterals)
         ]
         flat_feats = torch.cat([rearrange(x, "b c h w -> b (h w) c") for x in feats], 1)
+
         # compute locations
         loc_logits = self.loc_head(flat_feats).squeeze(2)
         loc_logits, loc_idxs = loc_logits.topk(self.max_instances, dim=1)
@@ -120,9 +127,8 @@ class KeypointDetection(nn.Module):
         offsets, _ = self.get_offsets_and_scales(
             inputs[self.bottom_level : self.top_level + 1]
         )
-        mask_offsets = torch.cat(
-            [repeat(_, "h w c -> b (h w) c", b=batch_size) for _ in offsets], dim=1
-        )[batches, loc_idxs]
+        mask_offsets = [repeat(_, "h w c -> b (h w) c", b=batch_size) for _ in offsets]
+        mask_offsets = torch.cat(mask_offsets, dim=1)[batches, loc_idxs]
         mask_offsets = rearrange(mask_offsets, "b i c -> b i c 1 1")
         grid, _ = self.get_offsets_and_scales(
             inputs[self.mask_level : self.mask_level + 1]
@@ -174,9 +180,6 @@ class KeypointDetection(nn.Module):
         assert len(inputs) > self.top_level, "too few input levels"
         device = inputs[0].device
         batch_size, _, full_height, full_width = inputs[0].shape
-        full_size = torch.tensor(
-            [[full_width, full_height, full_width, full_height]], device=device
-        )
 
         # remove degenerate instances (those with no visible keypoint)
         clean_keypoints, clean_presence = [], []
@@ -197,7 +200,8 @@ class KeypointDetection(nn.Module):
             [repeat(_, "h w c -> (h w) (2 c)", c=2) for _ in offsets]
         )
         flat_scales = torch.cat([rearrange(_, "h w c -> (h w) c") for _ in scales])
-        anchors = (flat_offsets + flat_scales) * full_size
+        full_size = torch.tensor([[full_width, full_height, full_width, full_height]])
+        anchors = (flat_offsets + flat_scales) * full_size.to(device)
 
         # assign anchors to gt objects
         matching_results = [
@@ -220,17 +224,16 @@ class KeypointDetection(nn.Module):
         with torch.autocast(device_type="cuda", enabled=False):
             loc_target = (rel_iou == 1.0).to(torch.float32)
             loc_loss = functional.binary_cross_entropy_with_logits(
-                loc_logits.to(torch.float32), loc_target, reduction="none"
+                loc_logits, loc_target, reduction="none"
             )
             loc_loss = loc_loss.sum() / loc_target.sum()
 
         if rel_iou.max() == 0:
-            zero = torch.zeros_like(loc_loss)
-            metrics = {
+            return loc_loss, {
                 "location_loss": loc_loss,
-                **{"box_loss": zero, "class_loss": zero, "iou_loss": zero},
+                "keypoint_loss": torch.zeros_like(loc_loss),
+                "presence_loss": torch.zeros_like(loc_loss),
             }
-            return loc_loss, metrics
 
         # presence loss
         presence_logits = self.presence_head(o2m_feats)
@@ -243,6 +246,7 @@ class KeypointDetection(nn.Module):
             )
             presence_loss = (o2m_weights * presence_loss).sum() / o2m_weights.sum()
 
+        # keypoint loss
         mask_feats = self.mask_head(self.mask_lateral(inputs[self.mask_level]))
         grid, _ = self.get_offsets_and_scales(
             inputs[self.mask_level : self.mask_level + 1]
@@ -264,8 +268,8 @@ class KeypointDetection(nn.Module):
         if len(biased_mask_feats) == 0:
             return loc_loss, {
                 "location_loss": loc_loss,
-                "mask_loss": torch.zeros_like(loc_loss),
-                "class_loss": torch.zeros_like(loc_loss),
+                "keypoint_loss": torch.zeros_like(loc_loss),
+                "presence_loss": torch.zeros_like(loc_loss),
             }
 
         biased_mask_feats = torch.cat(biased_mask_feats)
@@ -315,7 +319,7 @@ class KeypointDetection(nn.Module):
 
     def on_validation_start(self) -> None:
         self.loss_computer = MeanMetric(nan_strategy="ignore")
-        self.pck_computer = PercentageOfCorrectKeypoints()
+        self.pck_computer = PercentageOfCorrectKeypoints(threshold=0.05)
 
     def validation_step(
         self, inputs: List[Tensor], keypoints: List[Tensor], presence: List[Tensor]

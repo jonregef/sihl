@@ -187,11 +187,8 @@ class CocoInstanceSegmentationDataset(torch.utils.data.Dataset):
         if train:
             self.transforms = transforms.Compose(
                 [
-                    transforms.ToImage(),
-                    # transforms.RandomPhotometricDistort(),
-                    # transforms.RandomZoomOut(side_range=(1.0, 2.0)),
-                    # transforms.RandomIoUCrop(),
                     transforms.RandomHorizontalFlip(),
+                    transforms.RandomZoomOut(side_range=(1.0, 2.0)),
                     transforms.Resize(image_size - 1, max_size=image_size),
                     transforms.RandomCrop(image_size, pad_if_needed=True),
                     transforms.ToDtype(torch.float32, scale=True),
@@ -200,7 +197,6 @@ class CocoInstanceSegmentationDataset(torch.utils.data.Dataset):
         else:
             self.transforms = transforms.Compose(
                 [
-                    transforms.ToImage(),
                     transforms.Resize(image_size - 1, max_size=image_size),
                     transforms.RandomCrop(image_size, pad_if_needed=True),
                     transforms.ToDtype(torch.float32, scale=True),
@@ -281,10 +277,8 @@ class CocoDataModule(pl.LightningDataModule):
         )
 
 
-STEPS_PER_EPOCH = 7330
-MAX_STEPS = 12 * STEPS_PER_EPOCH
 HYPERPARAMS = {
-    "max_steps": MAX_STEPS,
+    "max_steps": 90_000,
     "image_size": 640,
     "batch_size": 16,
     "gradient_clip_val": 0.1,
@@ -295,7 +289,7 @@ HYPERPARAMS = {
     "optimizer": "AdamW",
     "optimizer_kwargs": {"lr": 1e-4, "weight_decay": 1e-4, "backbone_lr_factor": 0.1},
     "scheduler": "MultiStepLR",
-    "scheduler_kwargs": {"milestones": [8 * STEPS_PER_EPOCH], "gamma": 0.1},
+    "scheduler_kwargs": {"milestones": [60_000, 80_000], "gamma": 0.1},
 }
 
 if __name__ == "__main__":

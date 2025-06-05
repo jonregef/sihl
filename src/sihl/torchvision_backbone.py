@@ -106,7 +106,6 @@ class TorchvisionBackbone(nn.Module):
         input_channels: int = 3,
         top_level: int = 5,
         frozen_levels: int = 0,
-        freeze_batchnorms: bool = False,
         downscaler: Type[nn.Module] = AntialiasedDownscaler,
     ) -> None:
         """
@@ -116,7 +115,6 @@ class TorchvisionBackbone(nn.Module):
             input_channels (int, optional): Number of input image channels. Defaults to 3.
             top_level (int, optional): Deepest level (with stride 2^level). Defaults to 5.
             frozen_levels (int, optional): How many levels to freeze (from level 0). Defaults to 0.
-            freeze_batchnorms (bool, optional): Whether to freeze batchnorm running stats. Defaults to False.
             downscaler (Type[nn.Module], optional): Downscaler module used for levels above 5. Defaults to AntialiasedDownscaler.
         """
         super().__init__()
@@ -157,9 +155,8 @@ class TorchvisionBackbone(nn.Module):
                 ),
             )
 
-        # freeze modules in first `frozen_levels` levels
         if pretrained:
-            freeze_levels(self.model, frozen_levels, level_names, freeze_batchnorms)
+            freeze_levels(self.model, frozen_levels, level_names)
 
         min_size = 2 ** (self.top_level + 1)
         self.dummy_input = torch.zeros(1, input_channels, min_size, min_size)
@@ -189,12 +186,7 @@ class TorchvisionBackbone(nn.Module):
         return outputs
 
 
-def freeze_levels(
-    model: nn.Module,
-    num_levels: int,
-    level_names: List[str],
-    freeze_batchnorms: bool = False,
-) -> None:
+def freeze_levels(model: nn.Module, num_levels: int, level_names: List[str]) -> None:
     """freeze modules in first `num_levels` levels"""
     if num_levels < 0:
         for param in model.parameters():
@@ -216,8 +208,3 @@ def freeze_levels(
     else:
         for param in model.parameters():
             param.requires_grad_(True)
-
-    if freeze_batchnorms:
-        for layer in model.modules():
-            if isinstance(layer, (nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
-                layer.eval()

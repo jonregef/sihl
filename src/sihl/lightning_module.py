@@ -14,6 +14,8 @@ from sihl.heads import Head, ViewInvarianceLearning
 from sihl.sihl_model import SihlModel
 from sihl.visualization import visualize
 
+# TODO: EMA (https://github.com/Lightning-AI/pytorch-lightning/pull/20545)
+
 # https://github.com/Lightning-AI/pytorch-lightning/issues/5558#issuecomment-1199306489
 warnings.filterwarnings("ignore", "Detected call of", UserWarning)
 torch.set_float32_matmul_precision("high")
@@ -198,8 +200,10 @@ class SihlLightningModule(pl.LightningModule):
             for mn, m in self.named_modules():
                 for pn, p in m.named_parameters():
                     if pn.endswith("bias") or isinstance(m, blacklist):
+                        print(f"skipping {mn}.{pn}")
                         no_decay.add(p)
                     if hasattr(m, "disable_weight_decay") and m.disable_weight_decay:
+                        print(f"skipping {mn}.{pn}")
                         no_decay.add(p)
 
             decay = set(self.parameters()) - no_decay

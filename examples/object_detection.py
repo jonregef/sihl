@@ -174,6 +174,7 @@ class CocoObjectDetectionDataset(torch.utils.data.Dataset):
             self.transforms = transforms.Compose(
                 [
                     transforms.RandomHorizontalFlip(),
+                    transforms.RandomPhotometricDistort(),
                     transforms.RandomZoomOut(side_range=(1.0, 2.0)),
                     transforms.Resize(image_size - 1, max_size=image_size),
                     transforms.RandomCrop(image_size, pad_if_needed=True),
