@@ -266,9 +266,8 @@ class InstanceSegmentation(nn.Module):
         masks_preds = torch.einsum("bchw,bcd->bdhw", masks_preds, w3) + b3
         masks_preds = masks_preds.squeeze(1).sigmoid()
 
-        target_masks = torch.cat(
-            [masks[b][assignment[b, o2m_mask[b]]] for b in range(batch_size)]
-        ).to(masks_preds)
+        target_masks = [masks[b][assignment[b, m]] for b, m in enumerate(o2m_mask)]
+        target_masks = torch.cat([_ for _ in target_masks if _.numel()]).to(masks_preds)
         target_masks = functional.interpolate(
             target_masks.unsqueeze(1), size=masks_preds.shape[1:], mode="bilinear"
         ).squeeze(1)
@@ -281,9 +280,8 @@ class InstanceSegmentation(nn.Module):
 
         # classification loss
         class_logits = self.cls_head(o2m_feats)
-        class_target = torch.cat(
-            [classes[b][assignment[b, m]] for b, m in enumerate(o2m_mask)]
-        )
+        class_target = [classes[b][assignment[b, m]] for b, m in enumerate(o2m_mask)]
+        class_target = torch.cat([_ for _ in class_target if _.numel()])
         with torch.autocast(device_type="cuda", enabled=False):
             class_loss = functional.cross_entropy(
                 class_logits.to(torch.float32), class_target, reduction="none"
