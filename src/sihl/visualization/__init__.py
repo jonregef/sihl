@@ -17,7 +17,7 @@ from . import metric_learning
 from . import multiclass_classification
 from . import multilabel_classification
 from . import object_detection
-from . import panoptic_segmentation
+# from . import panoptic_segmentation
 from . import quadrilateral_detection
 from . import regression
 from . import semantic_segmentation

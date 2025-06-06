@@ -1,10 +1,8 @@
 from typing import List
-from functools import partial
 
 from torch import nn, Tensor
-
-from sihl.layers.convblocks import ConvNormAct
-from sihl.layers.scalers import Interpolate
+from torch.nn import functional
+from torchvision import ops
 
 
 class FPN(nn.Module):
@@ -16,8 +14,6 @@ class FPN(nn.Module):
         out_channels: int,
         bottom_level: int,
         top_level: int,
-        norm: str = "batch",
-        act: str = "silu",
     ):
         super().__init__()
         assert 0 < bottom_level < top_level
@@ -27,15 +23,12 @@ class FPN(nn.Module):
         self.out_channels = in_channels.copy()
         self.out_channels[levels.start : levels.stop] = [out_channels for _ in levels]
 
-        Conv = partial(ConvNormAct, norm=norm, act=act)
+        Conv = ops.Conv2dNormActivation
         self.input_projections = nn.ModuleList(
             Conv(in_channels[level], out_channels, 1) for level in self.in_levels
         )
         self.up_convs = nn.ModuleList(
             Conv(out_channels, out_channels, 1) for level in self.in_levels[:-1]
-        )
-        self.upscalers = nn.ModuleList(
-            Interpolate(scale=2) for level in self.in_levels[:-1]
         )
         self.extra_downscalers = nn.ModuleList(
             Conv(out_channels, out_channels, stride=2)
@@ -48,9 +41,11 @@ class FPN(nn.Module):
         xs = [project(x) for project, x in zip(self.input_projections, xs)]
 
         top_down = [xs[-1]]
-        for i, (conv, up) in enumerate(zip(self.up_convs, self.upscalers)):
+        for i, conv in enumerate(self.up_convs):
             top_down[i] = conv(top_down[i])
-            top_down.append(up(top_down[i]) + xs[-(i + 2)])
+            top_down.append(
+                functional.interpolate(top_down[i], scale_factor=2) + xs[-(i + 2)]
+            )
 
         top_down = top_down[::-1]
         for down in self.extra_downscalers:

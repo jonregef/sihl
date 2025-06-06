@@ -216,10 +216,8 @@ class CyrillicDataModule(pl.LightningDataModule):
         )
 
 
-STEPS_PER_EPOCH = 1129
-EPOCHS = 100
 HYPERPARAMS = {
-    "max_steps": EPOCHS * STEPS_PER_EPOCH,
+    "max_steps": 90_000,
     "image_size": (64, 256),
     "batch_size": 64,
     "gradient_clip_val": 0.1,
@@ -231,13 +229,9 @@ HYPERPARAMS = {
         "level": 5,
     },
     "optimizer": "AdamW",
-    "optimizer_kwargs": {"lr": 1e-4, "weight_decay": 1e-2},
+    "optimizer_kwargs": {"lr": 1e-3, "weight_decay": 1e-2},
     "scheduler": "OneCycleLR",
-    "scheduler_kwargs": {
-        "max_lr": 1e-3,
-        "epochs": EPOCHS,
-        "steps_per_epoch": STEPS_PER_EPOCH,
-    },
+    "scheduler_kwargs": {"max_lr": 1e-3, "total_steps": 90_000},
 }
 
 if __name__ == "__main__":

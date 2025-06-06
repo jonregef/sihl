@@ -13,8 +13,7 @@ from sihl.utils import EPS
 
 
 class DepthEstimation(SemanticSegmentation):
-    """Depth estimation is pixelwise regression.
-
+    """
     Refs:
         1. [Adabins](https://arxiv.org/abs/2011.14141)
     """

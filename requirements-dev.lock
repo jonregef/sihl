@@ -156,7 +156,7 @@ onnx==1.17.0
     # via onnxslim
 onnxruntime==1.20.1
 onnxscript==0.1.0.dev20241230
-onnxslim==0.1.50
+onnxslim==0.1.53
 packaging==24.2
     # via huggingface-hub
     # via lightning

@@ -1,3 +1,5 @@
+# TODO: panoptic segmentation as dual-head model
+
 from typing import Tuple
 from pathlib import Path
 import logging

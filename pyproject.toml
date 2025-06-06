@@ -36,7 +36,7 @@ Repository = "https://github.com/jonregef/sihl"
 [project.optional-dependencies]
 timm = ["timm>=1.0.15"]
 lightning = ["lightning>=2.4.0"]
-onnx = ["onnx>=1.17.0", "onnxruntime>=1.19.2"]
+onnx = ["onnx>=1.17.0", "onnxruntime>=1.19.2", "onnxscript>=0.1.0.dev20241219"]
 all = [
     "lightning>=2.4.0",
     "onnx>=1.17.0",
@@ -73,7 +73,7 @@ dev-dependencies = [
     "torchvision>=0.20.1",
     "types-pyyaml>=6.0.12.20240917",
     "netron>=8.2.6",
-    "onnxslim>=0.1.50",
+    "onnxslim>=0.1.53",
 ]
 
 [tool.hatch.build.targets.sdist]

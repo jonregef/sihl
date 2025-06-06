@@ -10,17 +10,17 @@ All examples use the [imagenet-pretrained Resnet50 backbone from torchvision](ht
 
 You should get results similar to these:
 
-| task | epochs | dataset | metric name | best value |
+| task | steps | dataset | metric name | best value |
 | :--- | :---: | :---: | :---: | :---: |
 | [anomaly detection](./anomaly_detection.py) | 300 | MVTEC cable | accuracy | 0.72 |
 | [autoencoding](./autoencoding.py) | 200 | Stanford Cars | mean absolute error | 0.06 |
 | [depth estimation](./depth_estimation.py) | 30 | NYU V2 | mean absolute error | 0.35 |
-| [instance segmentation](./instance_segmentation.py) | 12 | COCO 2017 | mean average precision (mask) | 30% |
-| [keypoint detection](./keypoint_detection.py) | 12 | COCO 2017 | mean average precision (pose) | NA |
+| [instance segmentation](./instance_segmentation.py) | 90k | COCO 2017 | mean average precision (mask) | 27% |
+| [keypoint detection](./keypoint_detection.py) | 90k | COCO 2017 | percent of correct keypoint | 68% |
 | [metric learning](./metric_learning.py) | 5 | Stanford Cars | nearest neighbor accuracy | 0.79 |
 | [multiclass classification](./multiclass_classification.py) | 50 | Stanford Cars | accuracy | 88% |
 | [multilabel classification](./multilabel_classification.py) | 12 | COCO 2017 | accuracy | 0.98 |
-| [object detection](./object_detection.py) | 12 | COCO 2017 | mean average precision (box) | 37% |
+| [object detection](./object_detection.py) | 90k | COCO 2017 | mean average precision (box) | 35% |
 | [panoptic segmentation](./panoptic_segmentation.py) | 12 | COCO 2017 | (box) mean average precision | 0.29 |
 | [quadrilateral detection](./quadrilateral_detection.py) | 185 | Military aircrafts | mean average precision | 66% |
 | [regression](./regression.py) | 10 | Age prediction | mean absolute error | 6 |
